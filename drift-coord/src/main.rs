@@ -9,7 +9,7 @@ use drift_proto::{
 };
 use iroh::{Endpoint, PublicKey};
 use std::str::FromStr;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tracing::{error, info, warn};
 
 #[derive(Parser)]
@@ -113,6 +113,8 @@ async fn train(
         anyhow::bail!("no peers specified. Use --peers <node_id1>,<node_id2>");
     }
 
+    let started = Instant::now();
+
     println!("drift coordinator starting");
     println!("  Peers: {}", peer_ids.len());
 
@@ -190,7 +192,10 @@ async fn train(
     let assignments = scheduler::assign_shards(&node_infos, dataset_size);
 
     let total_vram: u64 = node_infos.iter().map(|n| n.gpu_vram_mb).sum();
+    let connect_elapsed = started.elapsed();
 
+    println!();
+    println!("All peers connected in {:.1}s", connect_elapsed.as_secs_f64());
     println!();
     println!("Starting training:");
     println!("  Nodes:         {}", node_infos.len());
