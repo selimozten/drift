@@ -134,13 +134,37 @@ pub async fn train(
     let active_nodes = Arc::new(Mutex::new(
         node_infos.iter().map(|n| n.node_id.clone()).collect::<Vec<_>>(),
     ));
+    let last_seen: Arc<Mutex<std::collections::HashMap<String, Instant>>> = Arc::new(Mutex::new(
+        node_infos.iter().map(|n| (n.node_id.clone(), Instant::now())).collect(),
+    ));
     let train_start = Instant::now();
 
     // Spawn a listener per peer
     let mut handles = Vec::new();
-    for (i, (_send, mut recv)) in connections.into_iter().enumerate() {
+    for (i, (send, mut recv)) in connections.into_iter().enumerate() {
         let node_id = node_infos[i].node_id.clone();
         let active = active_nodes.clone();
+        let seen = last_seen.clone();
+
+        let send = Arc::new(Mutex::new(send));
+        let send_hb = send.clone();
+
+        // Heartbeat sender: ping each node every 10 seconds
+        let hb_node_id = node_id.clone();
+        let hb_active = active.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(10));
+            loop {
+                interval.tick().await;
+                if !hb_active.lock().await.contains(&hb_node_id) {
+                    break;
+                }
+                let mut s = send_hb.lock().await;
+                if write_message(&mut *s, &DriftMessage::Ping).await.is_err() {
+                    break;
+                }
+            }
+        });
 
         let handle = tokio::spawn(async move {
             let mut last_step = 0u64;
@@ -159,10 +183,14 @@ pub async fn train(
                         );
                         last_step = p.step;
                         last_loss = p.loss;
+                        seen.lock().await.insert(node_id.clone(), Instant::now());
                     }
-                    Ok(DriftMessage::Pong) => {}
+                    Ok(DriftMessage::Pong) => {
+                        seen.lock().await.insert(node_id.clone(), Instant::now());
+                    }
                     Ok(DriftMessage::Heartbeat { uptime_secs }) => {
                         info!(node = %node_id, uptime_secs, "heartbeat");
+                        seen.lock().await.insert(node_id.clone(), Instant::now());
                     }
                     Ok(other) => {
                         info!(%other, "message from node");
@@ -176,10 +204,32 @@ pub async fn train(
 
             // Mark node as disconnected
             active.lock().await.retain(|id| id != &node_id);
+            seen.lock().await.remove(&node_id);
             (node_id, last_step, last_loss)
         });
         handles.push(handle);
     }
+
+    // Stale node detector: check every 15 seconds for nodes that haven't responded
+    let stale_seen = last_seen.clone();
+    let stale_active = active_nodes.clone();
+    let stale_detector = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(15));
+        loop {
+            interval.tick().await;
+            let active = stale_active.lock().await;
+            if active.is_empty() {
+                break;
+            }
+            let seen = stale_seen.lock().await;
+            let now = Instant::now();
+            for (id, last) in seen.iter() {
+                if now.duration_since(*last).as_secs() > 30 {
+                    warn!(node = %id, "node appears stale (no response in 30s)");
+                }
+            }
+        }
+    });
 
     // Wait for all peers to finish
     let mut results = Vec::new();
@@ -189,6 +239,8 @@ pub async fn train(
             Err(e) => error!("task error: {}", e),
         }
     }
+
+    stale_detector.abort();
 
     let elapsed = train_start.elapsed();
     println!();
