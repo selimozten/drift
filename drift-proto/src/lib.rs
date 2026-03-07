@@ -67,6 +67,12 @@ pub struct ShardAssignment {
     pub shard_end: u64,
 }
 
+impl ShardAssignment {
+    pub fn size(&self) -> u64 {
+        self.shard_end.saturating_sub(self.shard_start)
+    }
+}
+
 /// Training progress report from a node.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrainProgress {
