@@ -69,31 +69,42 @@ async fn join(name: Option<String>) -> Result<()> {
         available: true,
     });
 
-    // Accept incoming connections
-    loop {
-        let incoming = match endpoint.accept().await {
-            Some(incoming) => incoming,
-            None => {
-                info!("endpoint closed");
-                break;
-            }
-        };
+    // Accept incoming connections until Ctrl+C
+    let accept_loop = async {
+        loop {
+            let incoming = match endpoint.accept().await {
+                Some(incoming) => incoming,
+                None => {
+                    info!("endpoint closed");
+                    break;
+                }
+            };
 
-        let node_info = node_info_msg.clone();
-        tokio::spawn(async move {
-            match incoming.await {
-                Ok(conn) => {
-                    if let Err(e) = network::handle_connection(conn, node_info).await {
-                        error!("connection handler error: {}", e);
+            let node_info = node_info_msg.clone();
+            tokio::spawn(async move {
+                match incoming.await {
+                    Ok(conn) => {
+                        if let Err(e) = network::handle_connection(conn, node_info).await {
+                            error!("connection handler error: {}", e);
+                        }
+                    }
+                    Err(e) => {
+                        error!("failed to accept connection: {}", e);
                     }
                 }
-                Err(e) => {
-                    error!("failed to accept connection: {}", e);
-                }
-            }
-        });
+            });
+        }
+    };
+
+    tokio::select! {
+        _ = accept_loop => {}
+        _ = tokio::signal::ctrl_c() => {
+            println!();
+            println!("shutting down...");
+        }
     }
 
+    endpoint.close().await;
     Ok(())
 }
 
