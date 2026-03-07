@@ -1,4 +1,7 @@
-use crate::allreduce::{accumulate, average, bytes_to_f32, chunk_ranges, f32_to_bytes};
+use crate::allreduce::{
+    accumulate, average, bytes_to_f32, chunk_ranges, compress_sparse, decompress_sparse,
+    f32_to_bytes,
+};
 use crate::{read_message, write_message, DriftMessage, GradientChunk, ReducePhase};
 
 /// State for a single ring all-reduce operation.
@@ -91,6 +94,30 @@ impl RingState {
     }
 }
 
+/// Check if >50% of values are zero.
+fn is_sparse(data: &[f32]) -> bool {
+    let zeros = data.iter().filter(|&&v| v == 0.0).count();
+    zeros > data.len() / 2
+}
+
+/// Encode a chunk: compress if sparse, otherwise raw bytes.
+fn encode_chunk(data: &[f32]) -> (Vec<u8>, bool) {
+    if is_sparse(data) {
+        (compress_sparse(data), true)
+    } else {
+        (f32_to_bytes(data), false)
+    }
+}
+
+/// Decode a chunk: decompress if compressed, otherwise raw.
+fn decode_chunk(gc: &GradientChunk, expected_len: usize) -> Vec<f32> {
+    if gc.compressed {
+        decompress_sparse(&gc.data, expected_len)
+    } else {
+        bytes_to_f32(&gc.data)
+    }
+}
+
 /// Run the scatter-reduce phase over QUIC streams.
 /// `send_right` sends to the right neighbor, `recv_left` receives from the left.
 pub async fn run_scatter_reduce(
@@ -102,13 +129,13 @@ pub async fn run_scatter_reduce(
     let n = state.world_size;
     for iter in 0..(n - 1) {
         let (start, end, chunk_idx) = state.scatter_chunk_to_send(iter);
-        let data = f32_to_bytes(&state.buffer[start..end]);
+        let (data, compressed) = encode_chunk(&state.buffer[start..end]);
 
         let send_msg = DriftMessage::GradientChunk(GradientChunk {
             step,
             chunk_index: chunk_idx as u32,
             phase: ReducePhase::ScatterReduce,
-            compressed: false,
+            compressed,
             data,
         });
 
@@ -122,7 +149,8 @@ pub async fn run_scatter_reduce(
 
         match msg {
             DriftMessage::GradientChunk(gc) => {
-                let received = bytes_to_f32(&gc.data);
+                let (recv_start, recv_end, _) = state.scatter_chunk_to_recv(iter);
+                let received = decode_chunk(&gc, recv_end - recv_start);
                 state.apply_scatter(iter, &received);
             }
             other => anyhow::bail!("expected GradientChunk during scatter, got {}", other),
@@ -141,13 +169,13 @@ pub async fn run_allgather(
     let n = state.world_size;
     for iter in 0..(n - 1) {
         let (start, end, chunk_idx) = state.gather_chunk_to_send(iter);
-        let data = f32_to_bytes(&state.buffer[start..end]);
+        let (data, compressed) = encode_chunk(&state.buffer[start..end]);
 
         let send_msg = DriftMessage::GradientChunk(GradientChunk {
             step,
             chunk_index: chunk_idx as u32,
             phase: ReducePhase::AllGather,
-            compressed: false,
+            compressed,
             data,
         });
 
@@ -160,7 +188,8 @@ pub async fn run_allgather(
 
         match msg {
             DriftMessage::GradientChunk(gc) => {
-                let received = bytes_to_f32(&gc.data);
+                let (recv_start, recv_end, _) = state.gather_chunk_to_recv(iter);
+                let received = decode_chunk(&gc, recv_end - recv_start);
                 state.apply_gather(iter, &received);
             }
             other => anyhow::bail!("expected GradientChunk during gather, got {}", other),
