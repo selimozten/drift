@@ -44,6 +44,8 @@ impl fmt::Display for DriftMessage {
             Self::CheckpointInfo(c) => write!(f, "CheckpointInfo(step={})", c.step),
             Self::Ping => write!(f, "Ping"),
             Self::Pong => write!(f, "Pong"),
+            Self::Heartbeat { uptime_secs } => write!(f, "Heartbeat({}s)", uptime_secs),
+            Self::TrainComplete => write!(f, "TrainComplete"),
         }
     }
 }
@@ -110,6 +112,10 @@ pub enum DriftMessage {
     CheckpointInfo(CheckpointInfo),
     Ping,
     Pong,
+    /// Periodic heartbeat with uptime in seconds.
+    Heartbeat { uptime_secs: u64 },
+    /// Coordinator signals training is complete.
+    TrainComplete,
 }
 
 /// ALPN protocol identifier for drift.
