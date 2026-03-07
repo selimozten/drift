@@ -77,6 +77,65 @@ pub fn local_allreduce(gradients: &[Vec<f32>]) -> Vec<f32> {
     result
 }
 
+/// Compress gradient bytes by skipping runs of zeros.
+/// Format: [non-zero-count: u32][data...][zero-count: u32][non-zero-count: u32][data...]...
+/// This is effective for sparse gradients where many values are zero.
+pub fn compress_sparse(data: &[f32]) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < data.len() {
+        // Count zeros
+        let zero_start = i;
+        while i < data.len() && data[i] == 0.0 {
+            i += 1;
+        }
+        let zero_count = (i - zero_start) as u32;
+
+        // Count non-zeros
+        let nz_start = i;
+        while i < data.len() && data[i] != 0.0 {
+            i += 1;
+        }
+        let nz_count = (i - nz_start) as u32;
+
+        out.extend_from_slice(&zero_count.to_le_bytes());
+        out.extend_from_slice(&nz_count.to_le_bytes());
+        for j in nz_start..(nz_start + nz_count as usize) {
+            out.extend_from_slice(&data[j].to_le_bytes());
+        }
+    }
+    out
+}
+
+/// Decompress sparse gradient bytes back to f32 vec.
+pub fn decompress_sparse(compressed: &[u8], total_len: usize) -> Vec<f32> {
+    let mut result = vec![0.0f32; total_len];
+    let mut pos = 0usize; // position in result
+    let mut i = 0usize; // position in compressed
+
+    while i + 8 <= compressed.len() {
+        let zero_count =
+            u32::from_le_bytes([compressed[i], compressed[i + 1], compressed[i + 2], compressed[i + 3]])
+                as usize;
+        i += 4;
+        let nz_count =
+            u32::from_le_bytes([compressed[i], compressed[i + 1], compressed[i + 2], compressed[i + 3]])
+                as usize;
+        i += 4;
+
+        pos += zero_count;
+        for _ in 0..nz_count {
+            if pos < total_len && i + 4 <= compressed.len() {
+                result[pos] =
+                    f32::from_le_bytes([compressed[i], compressed[i + 1], compressed[i + 2], compressed[i + 3]]);
+                i += 4;
+                pos += 1;
+            }
+        }
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -138,5 +197,34 @@ mod tests {
         let grads = vec![vec![2.0, 4.0], vec![6.0, 8.0]];
         let result = local_allreduce(&grads);
         assert_eq!(result, vec![4.0, 6.0]);
+    }
+
+    #[test]
+    fn test_sparse_compression_roundtrip() {
+        // Sparse gradient: mostly zeros
+        let data = vec![0.0, 0.0, 1.5, 0.0, 0.0, 0.0, -2.0, 3.14, 0.0, 0.0];
+        let compressed = compress_sparse(&data);
+        let decompressed = decompress_sparse(&compressed, data.len());
+        assert_eq!(data, decompressed);
+        // Compressed should be smaller than raw
+        assert!(compressed.len() < data.len() * 4);
+    }
+
+    #[test]
+    fn test_sparse_compression_all_zeros() {
+        let data = vec![0.0f32; 1000];
+        let compressed = compress_sparse(&data);
+        let decompressed = decompress_sparse(&compressed, data.len());
+        assert_eq!(data, decompressed);
+        // Should be very small for all zeros
+        assert!(compressed.len() < 20);
+    }
+
+    #[test]
+    fn test_sparse_compression_no_zeros() {
+        let data = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        let compressed = compress_sparse(&data);
+        let decompressed = decompress_sparse(&compressed, data.len());
+        assert_eq!(data, decompressed);
     }
 }
