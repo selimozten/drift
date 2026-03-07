@@ -19,6 +19,7 @@ pub async fn train(
     epochs: u32,
     dataset_size: u64,
     checkpoint_dir: String,
+    resume: bool,
 ) -> Result<()> {
     if peer_ids.is_empty() {
         anyhow::bail!("no peers specified. Use --peers <node_id1>,<node_id2>");
@@ -26,6 +27,20 @@ pub async fn train(
 
     let started = Instant::now();
     println!("drift coordinator starting");
+
+    // Check for resume
+    if resume {
+        let latest_path = std::path::Path::new(&checkpoint_dir).join("latest.json");
+        if latest_path.exists() {
+            let data = tokio::fs::read_to_string(&latest_path).await?;
+            let ckpt: drift_proto::CheckpointInfo = serde_json::from_str(&data)?;
+            println!("  Resuming from checkpoint at step {}", ckpt.step);
+            println!("  Checkpoint path: {}", ckpt.path);
+        } else {
+            println!("  No checkpoint found, starting fresh");
+        }
+    }
+
     println!("  Peers: {}", peer_ids.len());
 
     let endpoint = Endpoint::builder()

@@ -61,6 +61,10 @@ enum Commands {
         /// Checkpoint output directory
         #[arg(long, default_value = "checkpoints/")]
         checkpoint_dir: String,
+
+        /// Resume from the latest checkpoint in checkpoint_dir
+        #[arg(long, default_value = "false")]
+        resume: bool,
     },
 
     /// Show local GPU status
@@ -90,6 +94,7 @@ async fn main() -> Result<()> {
             epochs,
             dataset_size,
             checkpoint_dir,
+            resume,
         } => {
             coord::train(
                 peers,
@@ -101,6 +106,7 @@ async fn main() -> Result<()> {
                 epochs,
                 dataset_size,
                 checkpoint_dir,
+                resume,
             )
             .await
         }
