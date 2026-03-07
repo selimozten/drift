@@ -1,4 +1,5 @@
 pub mod allreduce;
+pub mod ring;
 
 use std::fmt;
 
