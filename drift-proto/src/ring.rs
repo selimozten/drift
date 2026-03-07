@@ -1,4 +1,5 @@
-use crate::allreduce::{accumulate, average, chunk_ranges};
+use crate::allreduce::{accumulate, average, bytes_to_f32, chunk_ranges, f32_to_bytes};
+use crate::{read_message, write_message, DriftMessage, GradientChunk, ReducePhase};
 
 /// State for a single ring all-reduce operation.
 pub struct RingState {
@@ -88,6 +89,103 @@ impl RingState {
     pub fn result(&self) -> &[f32] {
         &self.buffer
     }
+}
+
+/// Run the scatter-reduce phase over QUIC streams.
+/// `send_right` sends to the right neighbor, `recv_left` receives from the left.
+pub async fn run_scatter_reduce(
+    state: &mut RingState,
+    step: u64,
+    send_right: &mut iroh::endpoint::SendStream,
+    recv_left: &mut iroh::endpoint::RecvStream,
+) -> anyhow::Result<()> {
+    let n = state.world_size;
+    for iter in 0..(n - 1) {
+        let (start, end, chunk_idx) = state.scatter_chunk_to_send(iter);
+        let data = f32_to_bytes(&state.buffer[start..end]);
+
+        let send_msg = DriftMessage::GradientChunk(GradientChunk {
+            step,
+            chunk_index: chunk_idx as u32,
+            phase: ReducePhase::ScatterReduce,
+            compressed: false,
+            data,
+        });
+
+        // Concurrent send and recv to prevent deadlock
+        let (send_result, recv_result) = tokio::join!(
+            write_message(send_right, &send_msg),
+            read_message(recv_left),
+        );
+        send_result?;
+        let msg = recv_result?;
+
+        match msg {
+            DriftMessage::GradientChunk(gc) => {
+                let received = bytes_to_f32(&gc.data);
+                state.apply_scatter(iter, &received);
+            }
+            other => anyhow::bail!("expected GradientChunk during scatter, got {}", other),
+        }
+    }
+    Ok(())
+}
+
+/// Run the all-gather phase over QUIC streams.
+pub async fn run_allgather(
+    state: &mut RingState,
+    step: u64,
+    send_right: &mut iroh::endpoint::SendStream,
+    recv_left: &mut iroh::endpoint::RecvStream,
+) -> anyhow::Result<()> {
+    let n = state.world_size;
+    for iter in 0..(n - 1) {
+        let (start, end, chunk_idx) = state.gather_chunk_to_send(iter);
+        let data = f32_to_bytes(&state.buffer[start..end]);
+
+        let send_msg = DriftMessage::GradientChunk(GradientChunk {
+            step,
+            chunk_index: chunk_idx as u32,
+            phase: ReducePhase::AllGather,
+            compressed: false,
+            data,
+        });
+
+        let (send_result, recv_result) = tokio::join!(
+            write_message(send_right, &send_msg),
+            read_message(recv_left),
+        );
+        send_result?;
+        let msg = recv_result?;
+
+        match msg {
+            DriftMessage::GradientChunk(gc) => {
+                let received = bytes_to_f32(&gc.data);
+                state.apply_gather(iter, &received);
+            }
+            other => anyhow::bail!("expected GradientChunk during gather, got {}", other),
+        }
+    }
+    Ok(())
+}
+
+/// Execute a full ring all-reduce over QUIC streams.
+/// Returns the averaged gradient buffer.
+pub async fn ring_allreduce(
+    mut state: RingState,
+    step: u64,
+    send_right: &mut iroh::endpoint::SendStream,
+    recv_left: &mut iroh::endpoint::RecvStream,
+) -> anyhow::Result<Vec<f32>> {
+    if state.world_size <= 1 {
+        state.finalize();
+        return Ok(state.buffer);
+    }
+
+    run_scatter_reduce(&mut state, step, send_right, recv_left).await?;
+    run_allgather(&mut state, step, send_right, recv_left).await?;
+    state.finalize();
+    Ok(state.buffer)
 }
 
 #[cfg(test)]
