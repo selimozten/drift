@@ -1,0 +1,16 @@
+# drift training configuration
+#
+# Usage:
+#   drift-coord train --config examples/train.yaml --peers <node_id1>,<node_id2>
+
+model_path: "model.pt"
+dataset_path: "./data/train"
+batch_size: 32
+learning_rate: 0.001
+epochs: 10
+
+# Total dataset size in bytes (used for shard calculation)
+dataset_size: 10000000
+
+# Directory to save checkpoints
+checkpoint_dir: "./checkpoints"
