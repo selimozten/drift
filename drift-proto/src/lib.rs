@@ -3,7 +3,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 /// Information about a node's GPU capabilities.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NodeInfo {
     pub node_id: String,
     pub gpu_name: String,
@@ -51,7 +51,7 @@ impl fmt::Display for DriftMessage {
 }
 
 /// Training configuration sent from coordinator to nodes.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TrainConfig {
     pub model_path: String,
     pub dataset_path: String,
@@ -61,7 +61,7 @@ pub struct TrainConfig {
 }
 
 /// Shard assignment for a specific node.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ShardAssignment {
     pub node_id: String,
     pub shard_index: u32,
@@ -76,7 +76,7 @@ impl ShardAssignment {
 }
 
 /// Training progress report from a node.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TrainProgress {
     pub node_id: String,
     pub epoch: u32,
@@ -86,7 +86,7 @@ pub struct TrainProgress {
 }
 
 /// Gradient payload for all-reduce synchronization.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GradientPayload {
     pub node_id: String,
     pub step: u64,
@@ -94,7 +94,7 @@ pub struct GradientPayload {
 }
 
 /// Checkpoint metadata.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CheckpointInfo {
     pub step: u64,
     pub path: String,
@@ -102,7 +102,7 @@ pub struct CheckpointInfo {
 }
 
 /// All messages exchanged between drift nodes.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum DriftMessage {
     NodeInfo(NodeInfo),
     TrainConfig(TrainConfig),
