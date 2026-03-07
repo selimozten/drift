@@ -54,6 +54,11 @@ impl fmt::Display for DriftMessage {
             Self::GradientChunk(g) => {
                 write!(f, "GradientChunk(step={}, chunk={}, {} bytes)", g.step, g.chunk_index, g.data.len())
             }
+            Self::BarrierSync { step, node_id } => {
+                write!(f, "BarrierSync(step={}, node={})", step, &node_id[..12.min(node_id.len())])
+            }
+            Self::BarrierReady { step } => write!(f, "BarrierReady(step={})", step),
+            Self::StartRing => write!(f, "StartRing"),
         }
     }
 }
@@ -154,10 +159,19 @@ pub enum DriftMessage {
     RingConfig(RingConfig),
     /// Gradient chunk sent between ring neighbors.
     GradientChunk(GradientChunk),
+    /// Node tells coordinator it reached a barrier step.
+    BarrierSync { step: u64, node_id: String },
+    /// Coordinator tells all nodes that barrier step is ready.
+    BarrierReady { step: u64 },
+    /// Coordinator signals nodes to connect to their ring neighbors.
+    StartRing,
 }
 
-/// ALPN protocol identifier for drift.
+/// ALPN protocol identifier for drift coordinator<->node traffic.
 pub const DRIFT_ALPN: &[u8] = b"drift/0";
+
+/// ALPN protocol identifier for node<->node ring all-reduce traffic.
+pub const DRIFT_RING_ALPN: &[u8] = b"drift-ring/0";
 
 /// Maximum allowed message size (64 MB).
 pub const MAX_MESSAGE_SIZE: usize = 64 * 1024 * 1024;
