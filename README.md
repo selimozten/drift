@@ -60,11 +60,22 @@ drift/
       scheduler.rs        # Shard assignment by GPU capability
       checkpoint.rs       # Checkpoint management
       monitor.rs          # Health monitoring, progress display
+  drift-cli/              # Unified CLI binary
+    src/
+      main.rs             # CLI: join, train, status
+      node.rs             # Node logic (GPU, training)
+      coord.rs            # Coordinator logic (sharding, monitoring)
   drift-proto/            # Shared protocol
     src/
       lib.rs              # Message types, framing, ALPN
+      allreduce.rs        # Ring all-reduce primitives
     tests/
       integration.rs      # Full handshake test
+      training.rs         # End-to-end training pipeline
+      stress.rs           # Bulk message and gradient tests
+  examples/
+    mock_train.py          # Mock training script for testing
+    train.yaml             # Example training config
 ```
 
 ## Quick start
@@ -83,13 +94,17 @@ cargo build --release
 ### Run a node
 
 ```sh
+# Using the unified CLI
+./target/release/drift join --name my-gpu-box
+
+# Or the standalone binary
 ./target/release/drift-node join --name my-gpu-box
 ```
 
 ### Start training (coordinator)
 
 ```sh
-./target/release/drift-coord train \
+./target/release/drift train \
   --peers <node_id_1>,<node_id_2> \
   --model-path model.pt \
   --dataset-path ./data \
@@ -97,16 +112,25 @@ cargo build --release
   --batch-size 32
 ```
 
+### Resume from checkpoint
+
+```sh
+./target/release/drift train \
+  --peers <node_id_1>,<node_id_2> \
+  --resume \
+  --checkpoint-dir checkpoints/
+```
+
 ### Check GPU status
 
 ```sh
-./target/release/drift-node status
+./target/release/drift status
 ```
 
 ### Debug logging
 
 ```sh
-RUST_LOG=debug ./target/release/drift-node join
+RUST_LOG=debug ./target/release/drift join
 ```
 
 ## Protocol
@@ -125,11 +149,16 @@ Messages are length-prefixed JSON over QUIC bidirectional streams (ALPN: `drift/
 - [x] GPU detection, node capability announcement
 - [x] Coordinator: peer management, shard scheduling
 - [x] Integration test: full handshake over local QUIC
-- [ ] Data sharding: split dataset across nodes
-- [ ] Gradient sync: all-reduce over QUIC
+- [x] Unified CLI binary (`drift join`, `drift train`, `drift status`)
+- [x] Training execution with progress streaming
+- [x] Ring all-reduce primitives for gradient sync
+- [x] Sparse gradient compression
+- [x] Heartbeat loop and stale node detection
+- [x] Checkpointing: periodic save with resume support
+- [x] Fault tolerance: shard redistribution on node drops
+- [x] Stress tests for bulk messages and gradient payloads
+- [ ] Gradient sync: all-reduce over QUIC streams
 - [ ] Python bridge: PyTorch DDP backend
-- [ ] Checkpointing: save/resume across swarm
-- [ ] Fault tolerance: handle node drops
 - [ ] Benchmarks vs standard DDP
 
 ## License
