@@ -9,6 +9,7 @@ use drift_proto::{
 };
 use iroh::{Endpoint, PublicKey};
 use std::str::FromStr;
+use std::time::Duration;
 use tracing::{error, info, warn};
 
 #[derive(Parser)]
@@ -145,10 +146,13 @@ async fn train(
 
         println!("  Connecting to {}...", &peer_id_str[..12.min(peer_id_str.len())]);
 
-        let conn = endpoint
-            .connect(public_key, DRIFT_ALPN)
-            .await
-            .with_context(|| format!("failed to connect to {}", peer_id_str))?;
+        let conn = tokio::time::timeout(
+            Duration::from_secs(30),
+            endpoint.connect(public_key, DRIFT_ALPN),
+        )
+        .await
+        .with_context(|| format!("connection to {} timed out after 30s", peer_id_str))?
+        .with_context(|| format!("failed to connect to {}", peer_id_str))?;
 
         info!(peer = %peer_id_str, "connected to peer");
 
