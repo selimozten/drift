@@ -118,17 +118,25 @@ async fn join(name: Option<String>) -> Result<()> {
 
 async fn status() -> Result<()> {
     let gpus = gpu::detect_gpus().await?;
+    let driver = gpu::driver_version().await;
 
     println!("drift node status");
     println!("---");
+    if let Some(v) = driver {
+        println!("  Driver: {}", v);
+    }
     if gpus.is_empty() {
         println!("  GPUs: none detected");
     } else {
+        let total_vram: u64 = gpus.iter().map(|g| g.vram_mb).sum();
         for (i, gpu) in gpus.iter().enumerate() {
             println!(
                 "  GPU {}: {} ({} MB VRAM, compute {})",
                 i, gpu.name, gpu.vram_mb, gpu.compute_capability
             );
+        }
+        if gpus.len() > 1 {
+            println!("  Total: {} MB VRAM across {} devices", total_vram, gpus.len());
         }
     }
 

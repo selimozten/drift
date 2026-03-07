@@ -67,6 +67,31 @@ pub async fn detect_gpus() -> Result<Vec<GpuInfo>> {
     }
 }
 
+/// Query the NVIDIA driver version, if available.
+pub async fn driver_version() -> Option<String> {
+    let output = tokio::process::Command::new("nvidia-smi")
+        .args(["--query-gpu=driver_version", "--format=csv,noheader"])
+        .output()
+        .await
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let version = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .next()?
+        .trim()
+        .to_string();
+
+    if version.is_empty() {
+        None
+    } else {
+        Some(version)
+    }
+}
+
 /// Return a placeholder GPU for systems without NVIDIA GPUs (e.g. development).
 pub fn placeholder_gpu() -> GpuInfo {
     GpuInfo {
