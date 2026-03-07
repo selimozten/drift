@@ -103,6 +103,12 @@ cargo build --release
 ./target/release/drift-node status
 ```
 
+### Debug logging
+
+```sh
+RUST_LOG=debug ./target/release/drift-node join
+```
+
 ## Protocol
 
 Messages are length-prefixed JSON over QUIC bidirectional streams (ALPN: `drift/0`).
