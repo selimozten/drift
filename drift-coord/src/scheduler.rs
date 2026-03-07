@@ -51,6 +51,31 @@ pub fn assign_shards(nodes: &[NodeInfo], total_dataset_size: u64) -> Vec<ShardAs
     assignments
 }
 
+/// Redistribute shards when a node drops out. Remaining nodes absorb
+/// the dropped node's data range proportionally by VRAM.
+pub fn redistribute_shards(
+    _current: &[ShardAssignment],
+    remaining_nodes: &[NodeInfo],
+    total_dataset_size: u64,
+) -> Vec<ShardAssignment> {
+    if remaining_nodes.is_empty() {
+        return vec![];
+    }
+
+    // If only one node left, give it everything
+    if remaining_nodes.len() == 1 {
+        return vec![ShardAssignment {
+            node_id: remaining_nodes[0].node_id.clone(),
+            shard_index: 0,
+            shard_start: 0,
+            shard_end: total_dataset_size,
+        }];
+    }
+
+    // Reassign using VRAM weighting over the remaining nodes
+    assign_shards(remaining_nodes, total_dataset_size)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -95,6 +120,35 @@ mod tests {
     fn empty_nodes_returns_empty() {
         let shards = assign_shards(&[], 1000);
         assert!(shards.is_empty());
+    }
+
+    #[test]
+    fn redistribute_after_node_drop() {
+        let nodes = vec![node("a", 8000), node("b", 12000), node("c", 24000)];
+        let original = assign_shards(&nodes, 100000);
+        assert_eq!(original.len(), 3);
+
+        // Node "b" drops out
+        let remaining = vec![node("a", 8000), node("c", 24000)];
+        let new_shards = redistribute_shards(&original, &remaining, 100000);
+        assert_eq!(new_shards.len(), 2);
+
+        // Shards should still cover the entire dataset
+        let total: u64 = new_shards.iter().map(|s| s.size()).sum();
+        assert_eq!(total, 100000);
+
+        // Node c should get proportionally more
+        assert!(new_shards[1].size() > new_shards[0].size());
+    }
+
+    #[test]
+    fn redistribute_to_single_node() {
+        let nodes = vec![node("a", 8000), node("b", 12000)];
+        let original = assign_shards(&nodes, 50000);
+        let remaining = vec![node("a", 8000)];
+        let new_shards = redistribute_shards(&original, &remaining, 50000);
+        assert_eq!(new_shards.len(), 1);
+        assert_eq!(new_shards[0].size(), 50000);
     }
 
     #[test]
