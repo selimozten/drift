@@ -48,6 +48,12 @@ impl fmt::Display for DriftMessage {
             Self::Pong => write!(f, "Pong"),
             Self::Heartbeat { uptime_secs } => write!(f, "Heartbeat({}s)", uptime_secs),
             Self::TrainComplete => write!(f, "TrainComplete"),
+            Self::RingConfig(r) => {
+                write!(f, "RingConfig(rank={}, world={})", r.rank, r.world_size)
+            }
+            Self::GradientChunk(g) => {
+                write!(f, "GradientChunk(step={}, chunk={}, {} bytes)", g.step, g.chunk_index, g.data.len())
+            }
         }
     }
 }
@@ -103,6 +109,32 @@ pub struct CheckpointInfo {
     pub nodes_contributed: Vec<String>,
 }
 
+/// Ring topology configuration sent to each node.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RingConfig {
+    pub rank: u32,
+    pub world_size: u32,
+    pub left_peer_id: String,
+    pub right_peer_id: String,
+}
+
+/// Phase of the ring all-reduce algorithm.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum ReducePhase {
+    ScatterReduce,
+    AllGather,
+}
+
+/// A gradient chunk sent between ring neighbors.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GradientChunk {
+    pub step: u64,
+    pub chunk_index: u32,
+    pub phase: ReducePhase,
+    pub compressed: bool,
+    pub data: Vec<u8>,
+}
+
 /// All messages exchanged between drift nodes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum DriftMessage {
@@ -118,6 +150,10 @@ pub enum DriftMessage {
     Heartbeat { uptime_secs: u64 },
     /// Coordinator signals training is complete.
     TrainComplete,
+    /// Ring topology configuration for a node.
+    RingConfig(RingConfig),
+    /// Gradient chunk sent between ring neighbors.
+    GradientChunk(GradientChunk),
 }
 
 /// ALPN protocol identifier for drift.
