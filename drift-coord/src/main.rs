@@ -1,6 +1,4 @@
-mod checkpoint;
-mod monitor;
-mod scheduler;
+use drift_coord::{checkpoint, monitor, scheduler};
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
