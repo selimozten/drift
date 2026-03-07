@@ -137,7 +137,6 @@ async fn handle_connection(
 
     // State for training
     let mut train_config = None;
-    let mut shard = None;
 
     loop {
         match read_message(&mut recv).await {
@@ -155,13 +154,11 @@ async fn handle_connection(
                 }
                 DriftMessage::ShardAssignment(s) => {
                     info!(shard_index = s.shard_index, size = s.size(), "received shard");
-                    shard = Some(s);
 
                     // Both config and shard received — start training
                     if let Some(ref config) = train_config {
-                        let shard_ref = shard.as_ref().unwrap();
                         info!("starting training");
-                        run_training(config, shard_ref, &mut send).await?;
+                        run_training(config, &s, &mut send).await?;
                     }
                 }
                 DriftMessage::Heartbeat { .. } => {
