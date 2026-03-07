@@ -46,7 +46,8 @@ async fn main() -> Result<()> {
 async fn join(name: Option<String>) -> Result<()> {
     // Detect GPUs
     let gpus = gpu::detect_gpus().await?;
-    let gpu_info = gpus.first().cloned().unwrap_or_else(gpu::placeholder_gpu);
+    let primary = gpus.first().cloned().unwrap_or_else(gpu::placeholder_gpu);
+    let total_vram: u64 = gpus.iter().map(|g| g.vram_mb).sum();
 
     // Create iroh endpoint
     let endpoint = network::create_endpoint().await?;
@@ -56,16 +57,23 @@ async fn join(name: Option<String>) -> Result<()> {
     println!("drift node started");
     println!("  Node ID:  {}", node_id);
     println!("  Name:     {}", display_name);
-    println!("  GPU:      {} ({} MB VRAM)", gpu_info.name, gpu_info.vram_mb);
+    if gpus.len() <= 1 {
+        println!("  GPU:      {} ({} MB VRAM)", primary.name, primary.vram_mb);
+    } else {
+        println!("  GPUs:     {} devices ({} MB total VRAM)", gpus.len(), total_vram);
+        for (i, g) in gpus.iter().enumerate() {
+            println!("    [{}] {} ({} MB)", i, g.name, g.vram_mb);
+        }
+    }
     println!();
     println!("Share your Node ID with the coordinator to join training.");
     println!("Waiting for connections...");
 
     let node_info_msg = DriftMessage::NodeInfo(NodeInfo {
         node_id: node_id.to_string(),
-        gpu_name: gpu_info.name,
-        gpu_vram_mb: gpu_info.vram_mb,
-        gpu_compute_capability: gpu_info.compute_capability,
+        gpu_name: primary.name,
+        gpu_vram_mb: total_vram.max(primary.vram_mb),
+        gpu_compute_capability: primary.compute_capability,
         available: true,
     });
 
