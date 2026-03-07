@@ -64,11 +64,23 @@ pub async fn handle_connection(
                         shard_index = shard.shard_index,
                         start = shard.shard_start,
                         end = shard.shard_end,
+                        size = shard.size(),
                         "received shard assignment"
                     );
                 }
+                DriftMessage::Heartbeat { .. } => {
+                    write_message(
+                        &mut send,
+                        &DriftMessage::Heartbeat { uptime_secs: 0 },
+                    )
+                    .await?;
+                }
+                DriftMessage::TrainComplete => {
+                    info!("training complete signal received");
+                    break;
+                }
                 other => {
-                    info!(?other, "received message");
+                    info!(%other, "received message");
                 }
             },
             Err(e) => {
