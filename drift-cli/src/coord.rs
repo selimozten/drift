@@ -145,6 +145,9 @@ pub async fn train(
     ));
     let train_start = Instant::now();
 
+    // Collect send handles for graceful shutdown
+    let mut send_handles: Vec<Arc<Mutex<iroh::endpoint::SendStream>>> = Vec::new();
+
     // Spawn a listener per peer
     let mut handles = Vec::new();
     for (i, (send, mut recv)) in connections.into_iter().enumerate() {
@@ -153,6 +156,7 @@ pub async fn train(
         let seen = last_seen.clone();
 
         let send = Arc::new(Mutex::new(send));
+        send_handles.push(send.clone());
         let send_hb = send.clone();
 
         // Heartbeat sender: ping each node every 10 seconds
@@ -278,6 +282,12 @@ pub async fn train(
     }
 
     stale_detector.abort();
+
+    // Send TrainComplete to any remaining connected nodes
+    for send in &send_handles {
+        let mut s = send.lock().await;
+        let _ = write_message(&mut *s, &DriftMessage::TrainComplete).await;
+    }
 
     let elapsed = train_start.elapsed();
     println!();
