@@ -1,6 +1,4 @@
-mod gpu;
-mod network;
-mod training;
+use drift_node::{gpu, network};
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
