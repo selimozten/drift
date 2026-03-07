@@ -1,4 +1,4 @@
-use drift_proto::{NodeInfo, ShardAssignment};
+use drift_proto::{NodeInfo, RingConfig, ShardAssignment};
 use tracing::info;
 
 /// Compute shard assignments based on GPU VRAM.
@@ -49,6 +49,27 @@ pub fn assign_shards(nodes: &[NodeInfo], total_dataset_size: u64) -> Vec<ShardAs
     }
 
     assignments
+}
+
+/// Build a ring topology from the connected nodes.
+/// Each node gets a rank and knows its left/right neighbors in the ring.
+pub fn build_ring(nodes: &[NodeInfo]) -> Vec<RingConfig> {
+    let n = nodes.len();
+    if n == 0 {
+        return vec![];
+    }
+    (0..n)
+        .map(|i| {
+            let left = if i == 0 { n - 1 } else { i - 1 };
+            let right = (i + 1) % n;
+            RingConfig {
+                rank: i as u32,
+                world_size: n as u32,
+                left_peer_id: nodes[left].node_id.clone(),
+                right_peer_id: nodes[right].node_id.clone(),
+            }
+        })
+        .collect()
 }
 
 /// Redistribute shards when a node drops out. Remaining nodes absorb
@@ -149,6 +170,48 @@ mod tests {
         let new_shards = redistribute_shards(&original, &remaining, 50000);
         assert_eq!(new_shards.len(), 1);
         assert_eq!(new_shards[0].size(), 50000);
+    }
+
+    #[test]
+    fn ring_two_nodes() {
+        let nodes = vec![node("a", 8000), node("b", 16000)];
+        let ring = build_ring(&nodes);
+        assert_eq!(ring.len(), 2);
+        // Node a: rank 0, left=b, right=b
+        assert_eq!(ring[0].rank, 0);
+        assert_eq!(ring[0].world_size, 2);
+        assert_eq!(ring[0].left_peer_id, "b");
+        assert_eq!(ring[0].right_peer_id, "b");
+        // Node b: rank 1, left=a, right=a
+        assert_eq!(ring[1].rank, 1);
+        assert_eq!(ring[1].left_peer_id, "a");
+        assert_eq!(ring[1].right_peer_id, "a");
+    }
+
+    #[test]
+    fn ring_three_nodes() {
+        let nodes = vec![node("a", 8000), node("b", 12000), node("c", 24000)];
+        let ring = build_ring(&nodes);
+        assert_eq!(ring.len(), 3);
+        // a: left=c, right=b
+        assert_eq!(ring[0].left_peer_id, "c");
+        assert_eq!(ring[0].right_peer_id, "b");
+        // b: left=a, right=c
+        assert_eq!(ring[1].left_peer_id, "a");
+        assert_eq!(ring[1].right_peer_id, "c");
+        // c: left=b, right=a
+        assert_eq!(ring[2].left_peer_id, "b");
+        assert_eq!(ring[2].right_peer_id, "a");
+    }
+
+    #[test]
+    fn ring_single_node() {
+        let nodes = vec![node("a", 8000)];
+        let ring = build_ring(&nodes);
+        assert_eq!(ring.len(), 1);
+        assert_eq!(ring[0].rank, 0);
+        assert_eq!(ring[0].left_peer_id, "a");
+        assert_eq!(ring[0].right_peer_id, "a");
     }
 
     #[test]
