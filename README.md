@@ -29,16 +29,27 @@ Machine A (coordinator):
 ```
 +------------------+         QUIC/iroh          +------------------+
 |   drift-coord    | <========================> |   drift-node     |
-|                  |                            |                  |
+|                  |   (ALPN: drift/0)          |                  |
 | - Connects to    |    Ping -> NodeInfo ->     | - Joins swarm    |
 |   peer nodes     |    TrainConfig ->          | - Detects GPU    |
 | - Shards dataset |    ShardAssignment ->      | - Runs training  |
-| - Coordinates    |    <- TrainProgress        | - Reports back   |
-|   training       |    <- GradientPayload      |                  |
+| - Assigns ring   |    RingConfig ->           | - Reports back   |
+| - Barrier sync   |    StartRing ->            | - Ring all-reduce|
+|                  |    <- BarrierSync          |                  |
+|                  |    BarrierReady ->          |                  |
+|                  |    <- TrainProgress        |                  |
 +------------------+                            +------------------+
-        |                                               |
-        v                                               v
-  drift-proto (shared message types, ALPN, framing)
+                                                   |          ^
+                                                   v          |
+                                          +------------------+
+                                          |  node <-> node   |
+                                          | (ALPN: drift-ring/0)
+                                          |  GradientChunk   |
+                                          |  ring all-reduce |
+                                          +------------------+
+        |
+        v
+  drift-proto (shared message types, ring state machine, ALPN, framing)
 ```
 
 All traffic is encrypted end-to-end via QUIC. NAT hole-punching is handled automatically by iroh, with relay fallback.
@@ -69,10 +80,13 @@ drift/
     src/
       lib.rs              # Message types, framing, ALPN
       allreduce.rs        # Ring all-reduce primitives
+      ring.rs             # Ring state machine + async QUIC all-reduce
     tests/
       integration.rs      # Full handshake test
       training.rs         # End-to-end training pipeline
       stress.rs           # Bulk message and gradient tests
+      ring_connect.rs     # Ring connectivity test (3-node)
+      ring_allreduce.rs   # Ring all-reduce over QUIC + stress tests
   examples/
     mock_train.py          # Mock training script for testing
     train.yaml             # Example training config
@@ -135,13 +149,26 @@ RUST_LOG=debug ./target/release/drift join
 
 ## Protocol
 
-Messages are length-prefixed JSON over QUIC bidirectional streams (ALPN: `drift/0`).
+Messages are length-prefixed JSON over QUIC bidirectional streams.
+
+### Coordinator-Node (ALPN: `drift/0`)
 
 1. Coordinator connects to node, sends `Ping`
 2. Node responds with `NodeInfo` (GPU name, VRAM, compute capability)
-3. Coordinator sends `TrainConfig` and `ShardAssignment`
-4. Node streams `TrainProgress` updates back
-5. Gradient synchronization via `GradientPayload` messages
+3. Coordinator sends `TrainConfig`, `ShardAssignment`, and `RingConfig`
+4. Coordinator sends `StartRing` — nodes establish peer-to-peer ring
+5. During training, nodes send `BarrierSync` per step, coordinator replies `BarrierReady`
+6. Node streams `TrainProgress` updates back
+
+### Ring All-Reduce (ALPN: `drift-ring/0`)
+
+Nodes form a logical ring (0 -> 1 -> 2 -> ... -> N-1 -> 0). Each node connects to its right neighbor and accepts from its left. Gradient synchronization uses the standard ring all-reduce algorithm:
+
+1. **Scatter-reduce** (N-1 iterations): each node sends one chunk to the right, receives from the left, and accumulates. After this phase, each node holds the fully-reduced version of one chunk.
+2. **All-gather** (N-1 iterations): each node sends its reduced chunk around the ring so all nodes end up with the complete result.
+3. **Finalize**: divide by N to get the average.
+
+Sparse gradients (>50% zeros) are automatically compressed before sending.
 
 ## Milestones
 
@@ -157,7 +184,7 @@ Messages are length-prefixed JSON over QUIC bidirectional streams (ALPN: `drift/
 - [x] Checkpointing: periodic save with resume support
 - [x] Fault tolerance: shard redistribution on node drops
 - [x] Stress tests for bulk messages and gradient payloads
-- [ ] Gradient sync: all-reduce over QUIC streams
+- [x] Gradient sync: ring all-reduce over QUIC streams
 - [ ] Python bridge: PyTorch DDP backend
 - [ ] Benchmarks vs standard DDP
 
