@@ -109,6 +109,9 @@ pub enum DriftMessage {
 /// ALPN protocol identifier for drift.
 pub const DRIFT_ALPN: &[u8] = b"drift/0";
 
+/// Maximum allowed message size (64 MB).
+pub const MAX_MESSAGE_SIZE: usize = 64 * 1024 * 1024;
+
 /// Serialize a DriftMessage to bytes (length-prefixed JSON).
 pub fn encode_message(msg: &DriftMessage) -> anyhow::Result<Vec<u8>> {
     let json = serde_json::to_vec(msg)?;
@@ -125,7 +128,7 @@ pub async fn read_message(recv: &mut iroh::endpoint::RecvStream) -> anyhow::Resu
     recv.read_exact(&mut len_buf).await?;
     let len = u32::from_be_bytes(len_buf) as usize;
 
-    if len > 64 * 1024 * 1024 {
+    if len > MAX_MESSAGE_SIZE {
         anyhow::bail!("message too large: {} bytes", len);
     }
 
