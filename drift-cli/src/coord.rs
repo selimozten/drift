@@ -127,6 +127,12 @@ pub async fn train(
     // Create checkpoint dir
     tokio::fs::create_dir_all(&checkpoint_dir).await.ok();
 
+    // Checkpoint tracking: save every 100 steps
+    let max_step = Arc::new(Mutex::new(0u64));
+    let last_ckpt_step = Arc::new(Mutex::new(0u64));
+    let ckpt_dir = checkpoint_dir.clone();
+    let ckpt_nodes: Vec<String> = node_infos.iter().map(|n| n.node_id.clone()).collect();
+
     println!("Monitoring training progress (Ctrl+C to stop)...");
     println!();
 
@@ -166,6 +172,11 @@ pub async fn train(
             }
         });
 
+        let ms = max_step.clone();
+        let lcs = last_ckpt_step.clone();
+        let cd = ckpt_dir.clone();
+        let cn = ckpt_nodes.clone();
+
         let handle = tokio::spawn(async move {
             let mut last_step = 0u64;
             let mut last_loss = 0.0f64;
@@ -184,6 +195,32 @@ pub async fn train(
                         last_step = p.step;
                         last_loss = p.loss;
                         seen.lock().await.insert(node_id.clone(), Instant::now());
+
+                        // Track max step and save checkpoint every 100 steps
+                        let mut ms_guard = ms.lock().await;
+                        if p.step > *ms_guard {
+                            *ms_guard = p.step;
+                        }
+                        let mut lcs_guard = lcs.lock().await;
+                        if *ms_guard > 0 && *ms_guard - *lcs_guard >= 100 {
+                            *lcs_guard = *ms_guard;
+                            let step = *ms_guard;
+                            drop(ms_guard);
+                            drop(lcs_guard);
+                            // Write checkpoint metadata
+                            let ckpt = drift_proto::CheckpointInfo {
+                                step,
+                                path: format!("{}/checkpoint-step-{}.pt", cd, step),
+                                nodes_contributed: cn.clone(),
+                            };
+                            let meta_path = format!("{}/checkpoint-step-{}.json", cd, step);
+                            if let Ok(json) = serde_json::to_string_pretty(&ckpt) {
+                                let _ = tokio::fs::write(&meta_path, &json).await;
+                                let latest = format!("{}/latest.json", cd);
+                                let _ = tokio::fs::write(&latest, &json).await;
+                                println!("  checkpoint saved at step {}", step);
+                            }
+                        }
                     }
                     Ok(DriftMessage::Pong) => {
                         seen.lock().await.insert(node_id.clone(), Instant::now());
