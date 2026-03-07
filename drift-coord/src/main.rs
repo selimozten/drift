@@ -189,12 +189,16 @@ async fn train(
     // Calculate shard assignments
     let assignments = scheduler::assign_shards(&node_infos, dataset_size);
 
+    let total_vram: u64 = node_infos.iter().map(|n| n.gpu_vram_mb).sum();
+
     println!();
     println!("Starting training:");
-    println!("  Nodes: {}", node_infos.len());
-    println!("  Epochs: {}", epochs);
-    println!("  Batch size: {} (per node)", batch_size);
+    println!("  Nodes:         {}", node_infos.len());
+    println!("  Total VRAM:    {} MB", total_vram);
+    println!("  Epochs:        {}", epochs);
+    println!("  Batch size:    {} (per node)", batch_size);
     println!("  Learning rate: {}", learning_rate);
+    println!("  Dataset:       {} bytes ({} shards)", dataset_size, assignments.len());
     println!();
 
     // Send training config and shard assignments to each peer
