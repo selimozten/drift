@@ -159,3 +159,92 @@ async fn test_ring_allreduce_2_nodes() {
         ep.close().await;
     }
 }
+
+/// Helper: run a 3-node all-reduce with the given gradient generator.
+async fn run_3node_allreduce(
+    make_gradient: impl Fn(usize) -> Vec<f32>,
+) {
+    let ep0 = ring_endpoint().await;
+    let ep1 = ring_endpoint().await;
+    let ep2 = ring_endpoint().await;
+    let eps = vec![ep0, ep1, ep2];
+
+    let mut streams = setup_ring(&eps).await;
+    let n = 3;
+
+    let gradients: Vec<Vec<f32>> = (0..n).map(&make_gradient).collect();
+    let expected = local_allreduce(&gradients);
+
+    let barrier = Arc::new(Barrier::new(n));
+    let mut handles = Vec::new();
+
+    for (i, (mut send_right, mut recv_left)) in streams.drain(..).enumerate() {
+        let grad = gradients[i].clone();
+        let exp = expected.clone();
+        let b = barrier.clone();
+
+        handles.push(tokio::spawn(async move {
+            let state = RingState::new(i, n, grad);
+            let result = ring_allreduce(state, 0, &mut send_right, &mut recv_left)
+                .await
+                .expect("allreduce");
+
+            for (j, (a, e)) in result.iter().zip(exp.iter()).enumerate() {
+                assert!(
+                    (a - e).abs() < 1e-2,
+                    "rank {} elem {}: got {} expected {}",
+                    i, j, a, e,
+                );
+            }
+
+            b.wait().await;
+        }));
+    }
+
+    for h in handles {
+        h.await.expect("allreduce task");
+    }
+
+    for ep in &eps {
+        ep.close().await;
+    }
+}
+
+/// Stress test: 100K float gradients.
+#[tokio::test]
+async fn test_ring_allreduce_100k() {
+    run_3node_allreduce(|rank| {
+        (0..100_000)
+            .map(|i| (rank as f32 + 1.0) * (i as f32 * 0.001))
+            .collect()
+    })
+    .await;
+}
+
+/// Stress test: 1M float gradients.
+#[tokio::test]
+async fn test_ring_allreduce_1m() {
+    run_3node_allreduce(|rank| {
+        (0..1_000_000)
+            .map(|i| (rank as f32 + 1.0) * (i as f32 * 0.0001))
+            .collect()
+    })
+    .await;
+}
+
+/// Stress test: sparse gradients (90% zeros), tests compression path.
+#[tokio::test]
+async fn test_ring_allreduce_sparse() {
+    run_3node_allreduce(|rank| {
+        (0..100_000)
+            .map(|i| {
+                if i % 10 == 0 {
+                    (rank as f32 + 1.0) * (i as f32)
+                } else {
+                    0.0
+                }
+            })
+            .collect()
+    })
+    .await;
+}
