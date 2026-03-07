@@ -1,3 +1,5 @@
+use std::fmt;
+
 use serde::{Deserialize, Serialize};
 
 /// Information about a node's GPU capabilities.
@@ -8,6 +10,42 @@ pub struct NodeInfo {
     pub gpu_vram_mb: u64,
     pub gpu_compute_capability: String,
     pub available: bool,
+}
+
+impl fmt::Display for NodeInfo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} | {} ({} MB VRAM, compute {})",
+            &self.node_id[..12.min(self.node_id.len())],
+            self.gpu_name,
+            self.gpu_vram_mb,
+            self.gpu_compute_capability,
+        )
+    }
+}
+
+impl fmt::Display for DriftMessage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NodeInfo(info) => write!(f, "NodeInfo({})", info),
+            Self::TrainConfig(c) => {
+                write!(f, "TrainConfig(epochs={}, batch={})", c.epochs, c.batch_size)
+            }
+            Self::ShardAssignment(s) => {
+                write!(f, "ShardAssignment(node={}, idx={})", &s.node_id[..12.min(s.node_id.len())], s.shard_index)
+            }
+            Self::TrainProgress(p) => {
+                write!(f, "TrainProgress(step={}, loss={:.4})", p.step, p.loss)
+            }
+            Self::GradientPayload(g) => {
+                write!(f, "GradientPayload(step={}, {} bytes)", g.step, g.data.len())
+            }
+            Self::CheckpointInfo(c) => write!(f, "CheckpointInfo(step={})", c.step),
+            Self::Ping => write!(f, "Ping"),
+            Self::Pong => write!(f, "Pong"),
+        }
+    }
 }
 
 /// Training configuration sent from coordinator to nodes.
