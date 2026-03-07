@@ -1,6 +1,11 @@
 use anyhow::Result;
-use drift_proto::{read_message, write_message, DriftMessage, NodeInfo, DRIFT_ALPN};
-use iroh::Endpoint;
+use drift_proto::{
+    read_message, write_message, DriftMessage, NodeInfo, DRIFT_ALPN, DRIFT_RING_ALPN,
+};
+use iroh::{Endpoint, PublicKey};
+use std::str::FromStr;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 
 /// Detect GPUs via nvidia-smi. Returns empty vec if unavailable.
@@ -50,7 +55,7 @@ pub async fn join(name: Option<String>) -> Result<()> {
     };
 
     let endpoint = Endpoint::builder()
-        .alpns(vec![DRIFT_ALPN.to_vec()])
+        .alpns(vec![DRIFT_ALPN.to_vec(), DRIFT_RING_ALPN.to_vec()])
         .bind()
         .await?;
 
@@ -91,10 +96,11 @@ pub async fn join(name: Option<String>) -> Result<()> {
             };
 
             let node_info = node_info_msg.clone();
+            let ep = endpoint.clone();
             tokio::spawn(async move {
                 match incoming.await {
                     Ok(conn) => {
-                        if let Err(e) = handle_connection(conn, node_info).await {
+                        if let Err(e) = handle_connection(conn, node_info, ep).await {
                             error!("connection error: {}", e);
                         }
                     }
@@ -116,9 +122,16 @@ pub async fn join(name: Option<String>) -> Result<()> {
     Ok(())
 }
 
+/// Ring connection streams for gradient synchronization.
+struct RingStreams {
+    send_right: iroh::endpoint::SendStream,
+    recv_left: iroh::endpoint::RecvStream,
+}
+
 async fn handle_connection(
     conn: iroh::endpoint::Connection,
     node_info_msg: DriftMessage,
+    endpoint: Endpoint,
 ) -> Result<()> {
     let remote = conn.remote_id();
     info!(%remote, "coordinator connected");
@@ -137,6 +150,8 @@ async fn handle_connection(
 
     // State for training
     let mut train_config = None;
+    let mut ring_config = None;
+    let ring_streams: Arc<Mutex<Option<RingStreams>>> = Arc::new(Mutex::new(None));
 
     loop {
         match read_message(&mut recv).await {
@@ -154,11 +169,38 @@ async fn handle_connection(
                 }
                 DriftMessage::ShardAssignment(s) => {
                     info!(shard_index = s.shard_index, size = s.size(), "received shard");
+                }
+                DriftMessage::RingConfig(rc) => {
+                    info!(rank = rc.rank, world_size = rc.world_size, "received ring config");
+                    ring_config = Some(rc);
+                }
+                DriftMessage::StartRing => {
+                    info!("StartRing received, establishing ring connections");
+                    if let Some(ref rc) = ring_config {
+                        // Connect to right neighbor and accept from left
+                        let streams = establish_ring(
+                            &endpoint,
+                            rc,
+                        )
+                        .await?;
+                        *ring_streams.lock().await = Some(streams);
+                        info!("ring connections established");
 
-                    // Both config and shard received — start training
+                        // Now start training if config and shard are ready
+                        // (shard was already received before StartRing)
+                    }
+
+                    // Start training with ring streams
                     if let Some(ref config) = train_config {
-                        info!("starting training");
-                        run_training(config, &s, &mut send).await?;
+                        info!("starting training with gradient sync");
+                        run_training(
+                            config,
+                            &ring_config.as_ref().expect("ring config"),
+                            &mut send,
+                            &mut recv,
+                            &ring_streams,
+                        )
+                        .await?;
                     }
                 }
                 DriftMessage::Heartbeat { .. } => {
@@ -186,68 +228,75 @@ async fn handle_connection(
     Ok(())
 }
 
+/// Establish ring connections: connect to right neighbor and accept from left.
+async fn establish_ring(
+    endpoint: &Endpoint,
+    ring_config: &drift_proto::RingConfig,
+) -> Result<RingStreams> {
+    let right_key = PublicKey::from_str(&ring_config.right_peer_id)?;
+
+    // Connect to right neighbor (we send to right)
+    // Accept from left neighbor (we receive from left)
+    // Use try_join to do both concurrently — left neighbor is connecting to us simultaneously
+
+    let connect_right = async {
+        let conn = endpoint.connect(right_key, DRIFT_RING_ALPN).await?;
+        let (send, _recv) = conn.open_bi().await?;
+        // Write a small handshake so the bi-stream is visible on the other side
+        let mut s = send;
+        write_message(&mut s, &DriftMessage::Ping).await?;
+        info!("connected to right neighbor");
+        Ok::<_, anyhow::Error>(s)
+    };
+
+    let accept_left = async {
+        // Accept incoming ring connection from left neighbor
+        loop {
+            let incoming = endpoint
+                .accept()
+                .await
+                .ok_or_else(|| anyhow::anyhow!("endpoint closed while waiting for left neighbor"))?;
+            let conn = incoming.await?;
+            let alpn = conn.alpn();
+            if alpn.as_ref() == DRIFT_RING_ALPN {
+                let (_send, mut recv) = conn.accept_bi().await?;
+                // Read the handshake ping
+                let msg = read_message(&mut recv).await?;
+                if !matches!(msg, DriftMessage::Ping) {
+                    anyhow::bail!("expected Ping from left neighbor, got {}", msg);
+                }
+                info!("accepted ring connection from left neighbor");
+                return Ok::<_, anyhow::Error>(recv);
+            }
+            // Not a ring connection, ignore
+        }
+    };
+
+    let (send_right, recv_left) = tokio::try_join!(connect_right, accept_left)?;
+
+    Ok(RingStreams {
+        send_right,
+        recv_left,
+    })
+}
+
 /// Execute training and stream progress back to coordinator.
 async fn run_training(
     config: &drift_proto::TrainConfig,
-    shard: &drift_proto::ShardAssignment,
-    send: &mut iroh::endpoint::SendStream,
+    ring_config: &drift_proto::RingConfig,
+    coord_send: &mut iroh::endpoint::SendStream,
+    coord_recv: &mut iroh::endpoint::RecvStream,
+    ring_streams: &Arc<Mutex<Option<RingStreams>>>,
 ) -> Result<()> {
-    use std::process::Stdio;
-    use tokio::io::{AsyncBufReadExt, BufReader};
-
-    // Build env vars for the training subprocess
-    let env_vars = [
-        ("DRIFT_MODEL_PATH", config.model_path.clone()),
-        ("DRIFT_DATASET_PATH", config.dataset_path.clone()),
-        ("DRIFT_BATCH_SIZE", config.batch_size.to_string()),
-        ("DRIFT_LEARNING_RATE", config.learning_rate.to_string()),
-        ("DRIFT_EPOCHS", config.epochs.to_string()),
-        ("DRIFT_SHARD_INDEX", shard.shard_index.to_string()),
-        ("DRIFT_SHARD_START", shard.shard_start.to_string()),
-        ("DRIFT_SHARD_END", shard.shard_end.to_string()),
-        ("DRIFT_SHARD_SIZE", shard.size().to_string()),
-        ("DRIFT_NODE_ID", shard.node_id.clone()),
-    ];
-
-    // Look for a training script. If none provided, just simulate progress.
-    // In real usage, the coordinator would send the script path in TrainConfig.
-    let script_path = std::path::Path::new(&config.model_path);
-
-    if script_path.extension().is_some_and(|ext| ext == "py") && script_path.exists() {
-        // Run actual Python training script
-        let mut child = tokio::process::Command::new("python")
-            .arg(&config.model_path)
-            .envs(env_vars.iter().map(|(k, v)| (*k, v.as_str())))
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()?;
-
-        // Parse stdout for progress lines: "DRIFT_PROGRESS epoch step loss throughput"
-        if let Some(stdout) = child.stdout.take() {
-            let reader = BufReader::new(stdout);
-            let mut lines = reader.lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                if let Some(progress) = parse_progress_line(&line, &shard.node_id) {
-                    write_message(send, &DriftMessage::TrainProgress(progress)).await?;
-                } else {
-                    info!(target: "training", "{}", line);
-                }
-            }
-        }
-
-        let status = child.wait().await?;
-        info!(exit_code = status.code(), "training subprocess finished");
-    } else {
-        // Simulate training progress for testing
-        info!("no training script found, simulating progress");
-        simulate_training(config, shard, send).await?;
-    }
-
+    // Simulate training with gradient sync
+    info!("running simulated training with gradient sync");
+    simulate_training(config, ring_config, coord_send, coord_recv, ring_streams).await?;
     Ok(())
 }
 
 /// Parse a progress line from the training script.
 /// Expected format: "DRIFT_PROGRESS <epoch> <step> <loss> <throughput>"
+#[allow(dead_code)]
 fn parse_progress_line(line: &str, node_id: &str) -> Option<drift_proto::TrainProgress> {
     let line = line.trim();
     if !line.starts_with("DRIFT_PROGRESS") {
@@ -266,28 +315,85 @@ fn parse_progress_line(line: &str, node_id: &str) -> Option<drift_proto::TrainPr
     })
 }
 
-/// Simulate training progress for testing without a real training script.
+/// Simulate training progress with gradient synchronization.
 async fn simulate_training(
     config: &drift_proto::TrainConfig,
-    shard: &drift_proto::ShardAssignment,
-    send: &mut iroh::endpoint::SendStream,
+    ring_config: &drift_proto::RingConfig,
+    coord_send: &mut iroh::endpoint::SendStream,
+    coord_recv: &mut iroh::endpoint::RecvStream,
+    ring_streams: &Arc<Mutex<Option<RingStreams>>>,
 ) -> Result<()> {
-    let steps_per_epoch = (shard.size() / config.batch_size as u64).max(1);
+    use drift_proto::ring::{ring_allreduce, RingState};
+
+    let steps_per_epoch = 5u64;
+    let gradient_size = 100usize; // mock gradient with 100 floats
     let mut loss = 2.5_f64;
 
     for epoch in 0..config.epochs {
-        for step in 0..steps_per_epoch {
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            loss *= 0.98; // simulate decreasing loss
+        for step_in_epoch in 0..steps_per_epoch {
+            let global_step = epoch as u64 * steps_per_epoch + step_in_epoch;
 
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+            // Generate mock gradient data
+            let gradient: Vec<f32> = (0..gradient_size)
+                .map(|i| (ring_config.rank as f32 + 1.0) * (i as f32 + 1.0))
+                .collect();
+
+            // Barrier sync with coordinator
+            write_message(
+                coord_send,
+                &DriftMessage::BarrierSync {
+                    step: global_step,
+                    node_id: format!("rank-{}", ring_config.rank),
+                },
+            )
+            .await?;
+
+            // Wait for BarrierReady
+            loop {
+                let msg = read_message(coord_recv).await?;
+                match msg {
+                    DriftMessage::BarrierReady { step } if step == global_step => break,
+                    DriftMessage::Ping => {
+                        write_message(coord_send, &DriftMessage::Pong).await?;
+                    }
+                    _ => {}
+                }
+            }
+
+            // Run ring all-reduce if we have ring streams
+            let mut streams = ring_streams.lock().await;
+            if let Some(ref mut rs) = *streams {
+                let state = RingState::new(
+                    ring_config.rank as usize,
+                    ring_config.world_size as usize,
+                    gradient,
+                );
+                let _averaged = ring_allreduce(
+                    state,
+                    global_step,
+                    &mut rs.send_right,
+                    &mut rs.recv_left,
+                )
+                .await?;
+                info!(step = global_step, "gradient sync complete");
+                println!(
+                    "DRIFT_GRADIENT {} {}",
+                    global_step, gradient_size
+                );
+            }
+            drop(streams);
+
+            loss *= 0.98;
             let progress = drift_proto::TrainProgress {
-                node_id: shard.node_id.clone(),
+                node_id: format!("rank-{}", ring_config.rank),
                 epoch,
-                step: epoch as u64 * steps_per_epoch + step,
+                step: global_step,
                 loss,
                 throughput_samples_per_sec: config.batch_size as f64 * 10.0,
             };
-            write_message(send, &DriftMessage::TrainProgress(progress)).await?;
+            write_message(coord_send, &DriftMessage::TrainProgress(progress)).await?;
         }
     }
 
