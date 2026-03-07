@@ -1,0 +1,131 @@
+# drift
+
+P2P distributed training. Plug your GPU into the mesh.
+
+## What is this?
+
+drift lets you train models across consumer GPUs on different networks. No cloud account, no VPN, no static IPs. Each machine joins the swarm by public key using [iroh](https://github.com/n0-computer/iroh) for peer-to-peer connectivity over QUIC.
+
+Think of it as a decentralized Slurm for indie researchers.
+
+## How it works
+
+```
+Machine A (RTX 3090)              Machine B (RTX 4090)
+  $ drift-node join                 $ drift-node join
+  > Node ID: abc123...              > Node ID: def456...
+  > GPU: RTX 3090 (24576 MB)       > GPU: RTX 4090 (24564 MB)
+  > Waiting for connections...      > Waiting for connections...
+
+Machine A (coordinator):
+  $ drift-coord train --peers abc123,def456 --epochs 10
+  > Connected: abc123 | RTX 3090 (24576 MB VRAM)
+  > Connected: def456 | RTX 4090 (24564 MB VRAM)
+  > Starting training (2 nodes, shards weighted by VRAM)
+```
+
+## Architecture
+
+```
++------------------+         QUIC/iroh          +------------------+
+|   drift-coord    | <========================> |   drift-node     |
+|                  |                            |                  |
+| - Connects to    |    Ping -> NodeInfo ->     | - Joins swarm    |
+|   peer nodes     |    TrainConfig ->          | - Detects GPU    |
+| - Shards dataset |    ShardAssignment ->      | - Runs training  |
+| - Coordinates    |    <- TrainProgress        | - Reports back   |
+|   training       |    <- GradientPayload      |                  |
++------------------+                            +------------------+
+        |                                               |
+        v                                               v
+  drift-proto (shared message types, ALPN, framing)
+```
+
+All traffic is encrypted end-to-end via QUIC. NAT hole-punching is handled automatically by iroh, with relay fallback.
+
+## Project structure
+
+```
+drift/
+  Cargo.toml              # Workspace
+  drift-node/             # Node binary
+    src/
+      main.rs             # CLI: join, status
+      gpu.rs              # GPU detection (nvidia-smi)
+      network.rs          # iroh endpoint, connection handling
+      training.rs         # Python training subprocess
+  drift-coord/            # Coordinator binary
+    src/
+      main.rs             # CLI: train
+      scheduler.rs        # Shard assignment by GPU capability
+      checkpoint.rs       # Checkpoint management
+      monitor.rs          # Health monitoring, progress display
+  drift-proto/            # Shared protocol
+    src/
+      lib.rs              # Message types, framing, ALPN
+    tests/
+      integration.rs      # Full handshake test
+```
+
+## Quick start
+
+### Requirements
+
+- Rust 1.75+
+- NVIDIA GPU with drivers installed (optional, runs in CPU-only mode without)
+
+### Build
+
+```sh
+cargo build --release
+```
+
+### Run a node
+
+```sh
+./target/release/drift-node join --name my-gpu-box
+```
+
+### Start training (coordinator)
+
+```sh
+./target/release/drift-coord train \
+  --peers <node_id_1>,<node_id_2> \
+  --model-path model.pt \
+  --dataset-path ./data \
+  --epochs 10 \
+  --batch-size 32
+```
+
+### Check GPU status
+
+```sh
+./target/release/drift-node status
+```
+
+## Protocol
+
+Messages are length-prefixed JSON over QUIC bidirectional streams (ALPN: `drift/0`).
+
+1. Coordinator connects to node, sends `Ping`
+2. Node responds with `NodeInfo` (GPU name, VRAM, compute capability)
+3. Coordinator sends `TrainConfig` and `ShardAssignment`
+4. Node streams `TrainProgress` updates back
+5. Gradient synchronization via `GradientPayload` messages
+
+## Milestones
+
+- [x] Cargo workspace, iroh connectivity, message protocol
+- [x] GPU detection, node capability announcement
+- [x] Coordinator: peer management, shard scheduling
+- [x] Integration test: full handshake over local QUIC
+- [ ] Data sharding: split dataset across nodes
+- [ ] Gradient sync: all-reduce over QUIC
+- [ ] Python bridge: PyTorch DDP backend
+- [ ] Checkpointing: save/resume across swarm
+- [ ] Fault tolerance: handle node drops
+- [ ] Benchmarks vs standard DDP
+
+## License
+
+MIT
