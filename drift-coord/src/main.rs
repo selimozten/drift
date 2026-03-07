@@ -12,7 +12,7 @@ use std::str::FromStr;
 use tracing::{error, info, warn};
 
 #[derive(Parser)]
-#[command(name = "drift-coord", about = "P2P distributed training coordinator")]
+#[command(name = "drift-coord", version, about = "P2P distributed training coordinator")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,

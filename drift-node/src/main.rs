@@ -8,7 +8,7 @@ use drift_proto::{DriftMessage, NodeInfo};
 use tracing::{error, info};
 
 #[derive(Parser)]
-#[command(name = "drift-node", about = "P2P distributed training node")]
+#[command(name = "drift-node", version, about = "P2P distributed training node")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
