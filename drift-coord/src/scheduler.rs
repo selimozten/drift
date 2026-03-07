@@ -50,3 +50,62 @@ pub fn assign_shards(nodes: &[NodeInfo], total_dataset_size: u64) -> Vec<ShardAs
 
     assignments
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn node(id: &str, vram: u64) -> NodeInfo {
+        NodeInfo {
+            node_id: id.to_string(),
+            gpu_name: "GPU".to_string(),
+            gpu_vram_mb: vram,
+            gpu_compute_capability: "8.0".to_string(),
+            available: true,
+        }
+    }
+
+    #[test]
+    fn equal_shards_when_no_vram() {
+        let nodes = vec![node("a", 0), node("b", 0)];
+        let shards = assign_shards(&nodes, 1000);
+        assert_eq!(shards.len(), 2);
+        assert_eq!(shards[0].size(), 500);
+        assert_eq!(shards[1].size(), 500);
+    }
+
+    #[test]
+    fn weighted_shards_by_vram() {
+        let nodes = vec![node("a", 8000), node("b", 24000)];
+        let shards = assign_shards(&nodes, 32000);
+        assert_eq!(shards.len(), 2);
+        assert_eq!(shards[0].size(), 8000);
+        assert_eq!(shards[1].size(), 24000);
+    }
+
+    #[test]
+    fn single_node_gets_full_dataset() {
+        let nodes = vec![node("a", 16000)];
+        let shards = assign_shards(&nodes, 50000);
+        assert_eq!(shards.len(), 1);
+        assert_eq!(shards[0].size(), 50000);
+    }
+
+    #[test]
+    fn empty_nodes_returns_empty() {
+        let shards = assign_shards(&[], 1000);
+        assert!(shards.is_empty());
+    }
+
+    #[test]
+    fn shards_cover_entire_dataset() {
+        let nodes = vec![node("a", 8000), node("b", 12000), node("c", 24000)];
+        let shards = assign_shards(&nodes, 100000);
+        let total: u64 = shards.iter().map(|s| s.size()).sum();
+        assert_eq!(total, 100000);
+        // Verify contiguous
+        for i in 1..shards.len() {
+            assert_eq!(shards[i].shard_start, shards[i - 1].shard_end);
+        }
+    }
+}
