@@ -366,7 +366,33 @@ async fn run_real_training(
     let mut stdin_writer = child_stdin;
     let mut stdout_reader = BufReader::new(child_stdout).lines();
 
-    // 3. IPC loop: read lines from child stdout, process commands
+    // 3. Wait for DRIFT_READY with timeout
+    let ready_deadline = tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        async {
+            while let Some(line) = stdout_reader.next_line().await? {
+                if matches!(ipc::parse_python_line(&line), PythonMessage::Ready) {
+                    return Ok::<_, anyhow::Error>(());
+                }
+            }
+            anyhow::bail!("Python subprocess exited before sending DRIFT_READY")
+        },
+    )
+    .await;
+
+    match ready_deadline {
+        Ok(Ok(())) => info!("Python subprocess ready"),
+        Ok(Err(e)) => {
+            let _ = child.kill().await;
+            return Err(e);
+        }
+        Err(_) => {
+            let _ = child.kill().await;
+            anyhow::bail!("Python subprocess did not send DRIFT_READY within 60s — check stderr for errors");
+        }
+    }
+
+    // 4. IPC loop: read lines from child stdout, process commands
     // DDP sends multiple allreduce calls per step (one per gradient bucket).
     // We only barrier-sync with coordinator on the first bucket per step.
     let mut last_barrier_step: Option<u64> = None;
@@ -375,7 +401,7 @@ async fn run_real_training(
         let msg = ipc::parse_python_line(&line);
         match msg {
             PythonMessage::Ready => {
-                info!("Python subprocess ready");
+                // Already handled above, but harmless
             }
             PythonMessage::Allreduce { op_id, num_floats } => {
                 info!(op_id, num_floats, "allreduce request from Python");
@@ -457,10 +483,20 @@ async fn run_real_training(
         }
     }
 
-    // 4. Wait for child exit
-    let status = child.wait().await?;
-    if !status.success() {
-        warn!(code = ?status.code(), "Python subprocess exited with error");
+    // 5. Wait for child exit with timeout
+    match tokio::time::timeout(std::time::Duration::from_secs(30), child.wait()).await {
+        Ok(Ok(status)) => {
+            if !status.success() {
+                warn!(code = ?status.code(), "Python subprocess exited with error");
+            }
+        }
+        Ok(Err(e)) => {
+            warn!("error waiting for Python subprocess: {}", e);
+        }
+        Err(_) => {
+            warn!("Python subprocess did not exit within 30s, killing");
+            let _ = child.kill().await;
+        }
     }
 
     Ok(())
