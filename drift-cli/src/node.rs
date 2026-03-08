@@ -5,8 +5,12 @@ use drift_proto::{
 use iroh::{Endpoint, PublicKey};
 use std::str::FromStr;
 use std::sync::Arc;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};
+
+use crate::ipc::{self, PythonMessage};
+use crate::shm::{DriftShm, DEFAULT_SHM_SIZE};
 
 /// Detect GPUs via nvidia-smi. Returns empty vec if unavailable.
 async fn detect_gpus() -> Vec<(String, u64, String)> {
@@ -281,6 +285,7 @@ async fn establish_ring(
 }
 
 /// Execute training and stream progress back to coordinator.
+/// Dispatches to real Python training if model_path is a .py file, otherwise simulates.
 async fn run_training(
     config: &drift_proto::TrainConfig,
     ring_config: &drift_proto::RingConfig,
@@ -288,31 +293,142 @@ async fn run_training(
     coord_recv: &mut iroh::endpoint::RecvStream,
     ring_streams: &Arc<Mutex<Option<RingStreams>>>,
 ) -> Result<()> {
-    // Simulate training with gradient sync
-    info!("running simulated training with gradient sync");
-    simulate_training(config, ring_config, coord_send, coord_recv, ring_streams).await?;
-    Ok(())
+    if config.model_path.ends_with(".py")
+        && std::path::Path::new(&config.model_path).exists()
+    {
+        info!(script = %config.model_path, "launching real Python training");
+        run_real_training(config, ring_config, coord_send, coord_recv, ring_streams).await
+    } else {
+        info!("running simulated training with gradient sync");
+        simulate_training(config, ring_config, coord_send, coord_recv, ring_streams).await
+    }
 }
 
-/// Parse a progress line from the training script.
-/// Expected format: "DRIFT_PROGRESS <epoch> <step> <loss> <throughput>"
-#[allow(dead_code)]
-fn parse_progress_line(line: &str, node_id: &str) -> Option<drift_proto::TrainProgress> {
-    let line = line.trim();
-    if !line.starts_with("DRIFT_PROGRESS") {
-        return None;
+/// Run real Python training via subprocess with shared memory IPC.
+async fn run_real_training(
+    config: &drift_proto::TrainConfig,
+    ring_config: &drift_proto::RingConfig,
+    coord_send: &mut iroh::endpoint::SendStream,
+    coord_recv: &mut iroh::endpoint::RecvStream,
+    ring_streams: &Arc<Mutex<Option<RingStreams>>>,
+) -> Result<()> {
+    use drift_proto::ring::{ring_allreduce, RingState};
+    use std::process::Stdio;
+
+    // 1. Create shared memory
+    let shm = DriftShm::create(std::process::id(), DEFAULT_SHM_SIZE)?;
+    let shm_name = shm.name().to_string();
+    info!(shm = %shm_name, "created shared memory");
+
+    // 2. Spawn Python subprocess with piped stdio and env vars
+    let mut child = tokio::process::Command::new("python3")
+        .arg(&config.model_path)
+        .env("DRIFT_SHM_NAME", &shm_name)
+        .env("DRIFT_RANK", ring_config.rank.to_string())
+        .env("DRIFT_WORLD_SIZE", ring_config.world_size.to_string())
+        .env("DRIFT_BATCH_SIZE", config.batch_size.to_string())
+        .env("DRIFT_LEARNING_RATE", config.learning_rate.to_string())
+        .env("DRIFT_EPOCHS", config.epochs.to_string())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()?;
+
+    let child_stdin = child.stdin.take().expect("piped stdin");
+    let child_stdout = child.stdout.take().expect("piped stdout");
+    let mut stdin_writer = child_stdin;
+    let mut stdout_reader = BufReader::new(child_stdout).lines();
+
+    // 3. IPC loop: read lines from child stdout, process commands
+    while let Some(line) = stdout_reader.next_line().await? {
+        let msg = ipc::parse_python_line(&line);
+        match msg {
+            PythonMessage::Ready => {
+                info!("Python subprocess ready");
+            }
+            PythonMessage::Allreduce { op_id, num_floats } => {
+                info!(op_id, num_floats, "allreduce request from Python");
+
+                // Read gradient from shm
+                let gradient = shm.read_gradient(num_floats)?;
+
+                // Barrier sync with coordinator
+                write_message(
+                    coord_send,
+                    &DriftMessage::BarrierSync {
+                        step: op_id,
+                        node_id: format!("rank-{}", ring_config.rank),
+                    },
+                )
+                .await?;
+
+                // Wait for BarrierReady
+                loop {
+                    let coord_msg = read_message(coord_recv).await?;
+                    match coord_msg {
+                        DriftMessage::BarrierReady { step } if step == op_id => break,
+                        DriftMessage::Ping => {
+                            write_message(coord_send, &DriftMessage::Pong).await?;
+                        }
+                        _ => {}
+                    }
+                }
+
+                // Run ring all-reduce
+                let mut streams = ring_streams.lock().await;
+                let averaged = if let Some(ref mut rs) = *streams {
+                    let state = RingState::new(
+                        ring_config.rank as usize,
+                        ring_config.world_size as usize,
+                        gradient,
+                    );
+                    ring_allreduce(state, op_id, &mut rs.send_right, &mut rs.recv_left).await?
+                } else {
+                    // Single node: just average with self (no-op)
+                    gradient
+                };
+                drop(streams);
+
+                // Write result back to shm
+                shm.write_gradient(&averaged)?;
+
+                // Signal Python that allreduce is done
+                let response = format!("{}\n", ipc::format_allreduce_done(op_id));
+                stdin_writer.write_all(response.as_bytes()).await?;
+                stdin_writer.flush().await?;
+
+                info!(op_id, "allreduce complete");
+            }
+            PythonMessage::Progress { epoch, step, loss, throughput } => {
+                let progress = drift_proto::TrainProgress {
+                    node_id: format!("rank-{}", ring_config.rank),
+                    epoch,
+                    step,
+                    loss,
+                    throughput_samples_per_sec: throughput,
+                };
+                write_message(coord_send, &DriftMessage::TrainProgress(progress)).await?;
+            }
+            PythonMessage::Done => {
+                info!("Python training complete");
+                break;
+            }
+            PythonMessage::Unknown(line) => {
+                // Log non-protocol lines from Python
+                if !line.is_empty() {
+                    info!(line, "python output");
+                }
+            }
+        }
     }
-    let parts: Vec<&str> = line.split_whitespace().collect();
-    if parts.len() < 5 {
-        return None;
+
+    // 4. Wait for child exit
+    let status = child.wait().await?;
+    if !status.success() {
+        warn!(code = ?status.code(), "Python subprocess exited with error");
     }
-    Some(drift_proto::TrainProgress {
-        node_id: node_id.to_string(),
-        epoch: parts[1].parse().ok()?,
-        step: parts[2].parse().ok()?,
-        loss: parts[3].parse().ok()?,
-        throughput_samples_per_sec: parts[4].parse().ok()?,
-    })
+
+    Ok(())
 }
 
 /// Simulate training progress with gradient synchronization.
