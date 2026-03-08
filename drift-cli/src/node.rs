@@ -298,9 +298,13 @@ async fn run_training(
     ring_streams: &Arc<Mutex<Option<RingStreams>>>,
     shard: Option<&drift_proto::ShardAssignment>,
 ) -> Result<()> {
-    if config.model_path.ends_with(".py")
-        && std::path::Path::new(&config.model_path).exists()
-    {
+    if config.model_path.ends_with(".py") {
+        if !std::path::Path::new(&config.model_path).exists() {
+            anyhow::bail!(
+                "Python training script not found: {}. Check the --model-path argument.",
+                config.model_path
+            );
+        }
         info!(script = %config.model_path, "launching real Python training");
         run_real_training(config, ring_config, coord_send, coord_recv, ring_streams, shard).await
     } else {
