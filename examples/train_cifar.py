@@ -11,16 +11,22 @@ import os
 import sys
 import time
 
-import torch
-import torch.nn as nn
-import torch.optim as optim
-from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.data import DataLoader, TensorDataset
+try:
+    import torch
+    import torch.nn as nn
+    import torch.optim as optim
+    from torch.nn.parallel import DistributedDataParallel as DDP
+    from torch.utils.data import DataLoader, TensorDataset
+except ModuleNotFoundError:
+    print("ERROR: PyTorch is required. Install with: pip install torch", file=sys.stderr)
+    sys.exit(1)
 
-# Add drift-python to path if running from repo root
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "drift-python"))
-
-import drift
+try:
+    import drift
+except ImportError:
+    # Fall back to relative path when running from the repo
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "drift-python"))
+    import drift
 
 
 class SimpleCNN(nn.Module):
@@ -60,6 +66,9 @@ def make_synthetic_data(num_samples, batch_size):
 def main():
     epochs = int(os.environ.get("DRIFT_EPOCHS", "3"))
     batch_size = int(os.environ.get("DRIFT_BATCH_SIZE", "32"))
+    shard_index = os.environ.get("DRIFT_SHARD_INDEX")
+    shard_start = os.environ.get("DRIFT_SHARD_START")
+    shard_end = os.environ.get("DRIFT_SHARD_END")
 
     # Initialize drift (opens shm, registers DDP backend, prints DRIFT_READY)
     drift.init()
@@ -67,7 +76,11 @@ def main():
     rank = drift.rank()
     world_size = drift.world_size()
 
-    print(f"[train_cifar] rank={rank}/{world_size} epochs={epochs} batch={batch_size}",
+    shard_info = ""
+    if shard_index is not None:
+        shard_info = f" shard={shard_index}[{shard_start}:{shard_end}]"
+
+    print(f"[train_cifar] rank={rank}/{world_size} epochs={epochs} batch={batch_size}{shard_info}",
           file=sys.stderr, flush=True)
 
     # Model + DDP wrapper with drift communication hook

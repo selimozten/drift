@@ -13,15 +13,17 @@ import math
 def main():
     epochs = int(os.environ.get("DRIFT_EPOCHS", "3"))
     batch_size = int(os.environ.get("DRIFT_BATCH_SIZE", "32"))
-    shard_size = int(os.environ.get("DRIFT_SHARD_SIZE", "10000"))
     shard_index = int(os.environ.get("DRIFT_SHARD_INDEX", "0"))
+    shard_start = int(os.environ.get("DRIFT_SHARD_START", "0"))
+    shard_end = int(os.environ.get("DRIFT_SHARD_END", "10000"))
     lr = float(os.environ.get("DRIFT_LEARNING_RATE", "0.001"))
     node_id = os.environ.get("DRIFT_NODE_ID", "unknown")
 
+    shard_size = shard_end - shard_start
     steps_per_epoch = max(shard_size // batch_size, 1)
     loss = 2.5
 
-    print(f"[mock_train] node={node_id[:12]} shard={shard_index} "
+    print(f"[mock_train] node={node_id[:12]} shard={shard_index}[{shard_start}:{shard_end}] "
           f"epochs={epochs} steps/epoch={steps_per_epoch}", flush=True)
 
     for epoch in range(epochs):
