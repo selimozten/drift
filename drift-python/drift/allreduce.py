@@ -41,9 +41,10 @@ def allreduce(tensor, shm):
     t = tensor.detach().float().cpu().contiguous().view(-1)
     num_floats = t.numel()
 
-    # Write to shm (raw bytes)
-    data = t.numpy().tobytes()
-    shm.write_floats(data, num_floats)
+    # Write to shm (raw bytes via torch storage, no numpy needed)
+    import ctypes
+    data = (ctypes.c_char * (num_floats * 4)).from_address(t.data_ptr())
+    shm.write_floats(bytes(data), num_floats)
 
     # Signal Rust via stdout
     op_id = _next_op_id()

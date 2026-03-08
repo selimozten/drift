@@ -70,9 +70,10 @@ def main():
     print(f"[train_cifar] rank={rank}/{world_size} epochs={epochs} batch={batch_size}",
           file=sys.stderr, flush=True)
 
-    # Model + DDP wrapper
+    # Model + DDP wrapper with drift communication hook
     model = SimpleCNN()
     model = DDP(model)
+    drift.register(model)
 
     optimizer = optim.SGD(model.parameters(), lr=0.01, momentum=0.9)
     criterion = nn.CrossEntropyLoss()

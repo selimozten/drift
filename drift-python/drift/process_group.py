@@ -1,71 +1,45 @@
-"""PyTorch ProcessGroup backend for DDP over drift.
+"""PyTorch DDP communication hook for drift.
 
-Implements the minimal ProcessGroup interface needed for DDP to route
+Instead of subclassing ProcessGroup (which requires C++ backend registration),
+we use gloo for DDP initialization and install a comm_hook that redirects
 allreduce calls through our shm+stdio IPC to the Rust node.
 """
+
+import torch
+import torch.distributed as dist
 
 from drift.allreduce import allreduce
 
 
-class DriftWork:
-    """Synchronous work handle — allreduce is blocking, so work is always done."""
+def drift_comm_hook(shm):
+    """Create a DDP communication hook that routes allreduce through drift IPC.
 
-    def is_completed(self):
-        return True
+    Args:
+        shm: A DriftShm instance connected to the Rust node's shared memory.
 
-    def is_success(self):
-        return True
+    Returns:
+        A hook function compatible with DDP.register_comm_hook().
+    """
 
-    def wait(self, timeout=None):
-        return True
+    def hook(state, bucket):
+        tensor = bucket.buffer()
 
+        # Flatten to contiguous f32 on CPU
+        original_dtype = tensor.dtype
+        t = tensor.detach().float().cpu().contiguous().view(-1)
 
-class DriftProcessGroup:
-    """ProcessGroup that routes tensor operations through drift's IPC layer."""
+        result = allreduce(t, shm)
 
-    def __init__(self, rank, world_size, shm):
-        self._rank = rank
-        self._world_size = world_size
-        self._shm = shm
+        # Copy result back
+        if original_dtype != torch.float32:
+            result = result.to(original_dtype)
+        if tensor.device.type != "cpu":
+            result = result.to(tensor.device)
 
-    def rank(self):
-        return self._rank
+        tensor.copy_(result.view(tensor.shape))
 
-    def size(self):
-        return self._world_size
+        fut = torch.futures.Future()
+        fut.set_result(tensor)
+        return fut
 
-    def getBackendName(self):
-        return "drift"
-
-    def allreduce(self, tensors, opts=None):
-        """All-reduce a list of tensors (DDP passes one tensor per call)."""
-        import torch
-
-        for i, tensor in enumerate(tensors):
-            # Move to CPU f32 for IPC
-            was_cuda = tensor.device.type == "cuda"
-            original_dtype = tensor.dtype
-
-            t = tensor.detach().float().cpu().contiguous()
-            result = allreduce(t, self._shm)
-
-            # Copy result back in-place
-            if original_dtype != result.dtype:
-                result = result.to(original_dtype)
-            if was_cuda:
-                result = result.to(tensor.device)
-            tensor.data.copy_(result)
-
-        return DriftWork()
-
-    def broadcast(self, tensors, opts=None):
-        """Broadcast — no-op stub (rank 0 already has the data in single-coordinator setup)."""
-        return DriftWork()
-
-    def barrier(self, opts=None):
-        """Barrier — implemented as a zero-size allreduce."""
-        import torch
-
-        zero = torch.zeros(1)
-        self.allreduce([zero])
-        return DriftWork()
+    return hook
