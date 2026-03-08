@@ -29,28 +29,26 @@ Machine A (coordinator):
 ```
 +------------------+         QUIC/iroh          +------------------+
 |   drift-coord    | <========================> |   drift-node     |
-|                  |   (ALPN: drift/0)          |                  |
+|                  |   (ALPN: drift/0)          |   (Rust)         |
 | - Connects to    |    Ping -> NodeInfo ->     | - Joins swarm    |
 |   peer nodes     |    TrainConfig ->          | - Detects GPU    |
-| - Shards dataset |    ShardAssignment ->      | - Runs training  |
-| - Assigns ring   |    RingConfig ->           | - Reports back   |
+| - Shards dataset |    ShardAssignment ->      | - Spawns Python  |
+| - Assigns ring   |    RingConfig ->           | - IPC loop       |
 | - Barrier sync   |    StartRing ->            | - Ring all-reduce|
 |                  |    <- BarrierSync          |                  |
-|                  |    BarrierReady ->          |                  |
-|                  |    <- TrainProgress        |                  |
-+------------------+                            +------------------+
-                                                   |          ^
-                                                   v          |
-                                          +------------------+
-                                          |  node <-> node   |
-                                          | (ALPN: drift-ring/0)
-                                          |  GradientChunk   |
-                                          |  ring all-reduce |
-                                          +------------------+
-        |
-        v
+|                  |    BarrierReady ->          |   shm + stdio    |
+|                  |    <- TrainProgress        |       |          |
++------------------+                            +------v----------+
+                                                | Python subprocess|
+                                                |  PyTorch DDP     |
+  node <-> node                                 |  drift comm_hook |
+  (ALPN: drift-ring/0)                          |  train_cifar.py  |
+  ring all-reduce                               +------------------+
+
   drift-proto (shared message types, ring state machine, ALPN, framing)
 ```
+
+The Rust node owns QUIC connections and ring all-reduce. When `--model-path` points to a `.py` file, the node spawns it as a subprocess with shared memory for zero-copy gradient transfer and stdin/stdout for control messages. PyTorch DDP's communication hook routes `allreduce()` calls through this IPC channel.
 
 All traffic is encrypted end-to-end via QUIC. NAT hole-punching is handled automatically by iroh, with relay fallback.
 
@@ -74,8 +72,13 @@ drift/
   drift-cli/              # Unified CLI binary
     src/
       main.rs             # CLI: join, train, status
-      node.rs             # Node logic (GPU, training)
+      node.rs             # Node logic (GPU, training, Python subprocess)
       coord.rs            # Coordinator logic (sharding, monitoring)
+      shm.rs              # POSIX shared memory for Python IPC
+      ipc.rs              # Control message parsing for Python subprocess
+    tests/
+      test_python_ipc.rs  # Cross-language Rust↔Python integration test
+      helper_allreduce.py # Python helper for integration test
   drift-proto/            # Shared protocol
     src/
       lib.rs              # Message types, framing, ALPN
@@ -87,8 +90,19 @@ drift/
       stress.rs           # Bulk message and gradient tests
       ring_connect.rs     # Ring connectivity test (3-node)
       ring_allreduce.rs   # Ring all-reduce over QUIC + stress tests
+  drift-python/            # Python package (PyTorch DDP backend)
+    drift/
+      __init__.py         # drift.init() — entry point, gloo + comm_hook setup
+      shm.py              # Shared memory (open, read, write)
+      allreduce.py        # Low-level allreduce via shm + stdio IPC
+      process_group.py    # DDP communication hook
+    tests/
+      test_shm.py         # Shared memory unit tests
+      test_ipc_roundtrip.py  # Python-side IPC round-trip test
+      test_process_group.py  # DDP integration test
   examples/
     mock_train.py          # Mock training script for testing
+    train_cifar.py         # Real DDP training (CIFAR-10 with drift)
     train.yaml             # Example training config
 ```
 
@@ -141,6 +155,32 @@ cargo build --release
 ./target/release/drift status
 ```
 
+### Train with a real PyTorch script
+
+```sh
+# Install the drift Python package
+cd drift-python && pip install -e . && cd ..
+
+# Start training with a Python script
+./target/release/drift train \
+  --peers <node_id_1>,<node_id_2> \
+  --model-path examples/train_cifar.py \
+  --epochs 3 \
+  --batch-size 32
+```
+
+The training script uses standard PyTorch DDP:
+
+```python
+import drift
+from torch.nn.parallel import DistributedDataParallel as DDP
+
+drift.init()                    # opens shm, inits gloo, prints DRIFT_READY
+model = DDP(MyModel())
+drift.register(model)           # installs drift comm_hook for gradient sync
+# ... standard training loop, gradients flow through QUIC ring
+```
+
 ### Debug logging
 
 ```sh
@@ -185,7 +225,7 @@ Sparse gradients (>50% zeros) are automatically compressed before sending.
 - [x] Fault tolerance: shard redistribution on node drops
 - [x] Stress tests for bulk messages and gradient payloads
 - [x] Gradient sync: ring all-reduce over QUIC streams
-- [ ] Python bridge: PyTorch DDP backend
+- [x] Python bridge: PyTorch DDP backend (shm + stdio IPC, comm_hook)
 - [ ] Benchmarks vs standard DDP
 
 ## License
