@@ -321,9 +321,11 @@ async fn run_real_training(
     info!(shm = %shm_name, "created shared memory");
 
     // 2. Spawn Python subprocess with piped stdio and env vars
+    // Python's SharedMemory expects name without leading "/"
+    let python_shm_name = shm.python_name().to_string();
     let mut child = tokio::process::Command::new("python3")
         .arg(&config.model_path)
-        .env("DRIFT_SHM_NAME", &shm_name)
+        .env("DRIFT_SHM_NAME", &python_shm_name)
         .env("DRIFT_RANK", ring_config.rank.to_string())
         .env("DRIFT_WORLD_SIZE", ring_config.world_size.to_string())
         .env("DRIFT_BATCH_SIZE", config.batch_size.to_string())

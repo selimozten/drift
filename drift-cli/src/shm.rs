@@ -114,9 +114,15 @@ impl DriftShm {
         })
     }
 
-    /// The shm name (e.g. "/drift-shm-12345").
+    /// The POSIX shm name (e.g. "/drift-shm-12345").
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// The name for Python's SharedMemory (without leading "/").
+    /// Python's multiprocessing.shared_memory adds the "/" prefix internally.
+    pub fn python_name(&self) -> &str {
+        self.name.strip_prefix('/').unwrap_or(&self.name)
     }
 
     /// Maximum number of f32 values that fit in the data region.
