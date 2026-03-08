@@ -342,6 +342,10 @@ async fn run_real_training(
     let mut stdout_reader = BufReader::new(child_stdout).lines();
 
     // 3. IPC loop: read lines from child stdout, process commands
+    // DDP sends multiple allreduce calls per step (one per gradient bucket).
+    // We only barrier-sync with coordinator on the first bucket per step.
+    let mut last_barrier_step: Option<u64> = None;
+
     while let Some(line) = stdout_reader.next_line().await? {
         let msg = ipc::parse_python_line(&line);
         match msg {
@@ -354,26 +358,30 @@ async fn run_real_training(
                 // Read gradient from shm
                 let gradient = shm.read_gradient(num_floats)?;
 
-                // Barrier sync with coordinator
-                write_message(
-                    coord_send,
-                    &DriftMessage::BarrierSync {
-                        step: op_id,
-                        node_id: format!("rank-{}", ring_config.rank),
-                    },
-                )
-                .await?;
+                // Barrier sync with coordinator (only once per step, not per bucket).
+                // Use op_id as an approximation — first bucket of each step triggers barrier.
+                let needs_barrier = last_barrier_step.map_or(true, |s| op_id > s);
+                if needs_barrier {
+                    write_message(
+                        coord_send,
+                        &DriftMessage::BarrierSync {
+                            step: op_id,
+                            node_id: format!("rank-{}", ring_config.rank),
+                        },
+                    )
+                    .await?;
 
-                // Wait for BarrierReady
-                loop {
-                    let coord_msg = read_message(coord_recv).await?;
-                    match coord_msg {
-                        DriftMessage::BarrierReady { step } if step == op_id => break,
-                        DriftMessage::Ping => {
-                            write_message(coord_send, &DriftMessage::Pong).await?;
+                    loop {
+                        let coord_msg = read_message(coord_recv).await?;
+                        match coord_msg {
+                            DriftMessage::BarrierReady { step } if step == op_id => break,
+                            DriftMessage::Ping => {
+                                write_message(coord_send, &DriftMessage::Pong).await?;
+                            }
+                            _ => {}
                         }
-                        _ => {}
                     }
+                    last_barrier_step = Some(op_id);
                 }
 
                 // Run ring all-reduce
