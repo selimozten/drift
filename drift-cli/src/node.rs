@@ -155,6 +155,7 @@ async fn handle_connection(
     // State for training
     let mut train_config = None;
     let mut ring_config = None;
+    let mut shard_assignment = None;
     let ring_streams: Arc<Mutex<Option<RingStreams>>> = Arc::new(Mutex::new(None));
 
     loop {
@@ -173,6 +174,7 @@ async fn handle_connection(
                 }
                 DriftMessage::ShardAssignment(s) => {
                     info!(shard_index = s.shard_index, size = s.size(), "received shard");
+                    shard_assignment = Some(s);
                 }
                 DriftMessage::RingConfig(rc) => {
                     info!(rank = rc.rank, world_size = rc.world_size, "received ring config");
@@ -181,17 +183,18 @@ async fn handle_connection(
                 DriftMessage::StartRing => {
                     info!("StartRing received, establishing ring connections");
                     if let Some(ref rc) = ring_config {
-                        // Connect to right neighbor and accept from left
-                        let streams = establish_ring(
-                            &endpoint,
-                            rc,
-                        )
-                        .await?;
-                        *ring_streams.lock().await = Some(streams);
-                        info!("ring connections established");
-
-                        // Now start training if config and shard are ready
-                        // (shard was already received before StartRing)
+                        if rc.world_size > 1 {
+                            // Connect to right neighbor and accept from left
+                            let streams = establish_ring(
+                                &endpoint,
+                                rc,
+                            )
+                            .await?;
+                            *ring_streams.lock().await = Some(streams);
+                            info!("ring connections established");
+                        } else {
+                            info!("single-node training, skipping ring establishment");
+                        }
                     }
 
                     // Start training with ring streams
