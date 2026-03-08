@@ -26,26 +26,57 @@ Machine A (coordinator):
 
 ## Architecture
 
-```
-+------------------+         QUIC/iroh          +------------------+
-|   drift-coord    | <========================> |   drift-node     |
-|                  |   (ALPN: drift/0)          |   (Rust)         |
-| - Connects to    |    Ping -> NodeInfo ->     | - Joins swarm    |
-|   peer nodes     |    TrainConfig ->          | - Detects GPU    |
-| - Shards dataset |    ShardAssignment ->      | - Spawns Python  |
-| - Assigns ring   |    RingConfig ->           | - IPC loop       |
-| - Barrier sync   |    StartRing ->            | - Ring all-reduce|
-|                  |    <- BarrierSync          |                  |
-|                  |    BarrierReady ->          |   shm + stdio    |
-|                  |    <- TrainProgress        |       |          |
-+------------------+                            +------v----------+
-                                                | Python subprocess|
-                                                |  PyTorch DDP     |
-  node <-> node                                 |  drift comm_hook |
-  (ALPN: drift-ring/0)                          |  train_cifar.py  |
-  ring all-reduce                               +------------------+
+```mermaid
+graph TB
+    subgraph Coordinator
+        C[drift-coord<br/>Rust]
+    end
 
-  drift-proto (shared message types, ring state machine, ALPN, framing)
+    subgraph Node["Each Node"]
+        N[drift-node<br/>Rust]
+        P[Python subprocess<br/>PyTorch DDP + comm_hook]
+        N -- "shm: gradient data<br/>stdio: control messages" --> P
+    end
+
+    C -- "QUIC/iroh — ALPN: drift/0<br/>Ping, TrainConfig, ShardAssignment<br/>RingConfig, BarrierSync/Ready" --> N
+    N -- "TrainProgress, BarrierSync" --> C
+
+    N -. "QUIC — ALPN: drift-ring/0<br/>ring all-reduce<br/>(GradientChunk)" .-> N
+
+    style C fill:#2d3436,color:#dfe6e9
+    style N fill:#2d3436,color:#dfe6e9
+    style P fill:#2d3436,color:#dfe6e9
+```
+
+```mermaid
+sequenceDiagram
+    participant C as Coordinator
+    participant R as Rust Node
+    participant P as Python (DDP)
+
+    C->>R: Ping
+    R->>C: NodeInfo (GPU, VRAM)
+    C->>R: TrainConfig + ShardAssignment
+    C->>R: RingConfig + StartRing
+    R->>R: establish ring with neighbors
+
+    R->>P: spawn subprocess (shm + env vars)
+    P->>R: DRIFT_READY
+
+    loop each backward pass
+        P->>P: loss.backward() triggers comm_hook
+        P->>R: DRIFT_ALLREDUCE op_id num_floats (stdout)
+        Note over P,R: gradient in shared memory
+        R->>C: BarrierSync
+        C->>R: BarrierReady
+        R->>R: ring all-reduce over QUIC
+        Note over P,R: averaged gradient in shared memory
+        R->>P: DRIFT_ALLREDUCE_DONE op_id (stdin)
+        P->>R: DRIFT_PROGRESS epoch step loss throughput
+        R->>C: TrainProgress
+    end
+
+    P->>R: DRIFT_DONE
 ```
 
 The Rust node owns QUIC connections and ring all-reduce. When `--model-path` points to a `.py` file, the node spawns it as a subprocess with shared memory for zero-copy gradient transfer and stdin/stdout for control messages. PyTorch DDP's communication hook routes `allreduce()` calls through this IPC channel.

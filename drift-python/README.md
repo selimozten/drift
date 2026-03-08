@@ -19,6 +19,24 @@ The Python package is launched as a subprocess by the Rust `drift` node. Communi
 
 The Rust node owns the QUIC connections and performs ring all-reduce. Python just writes gradients to shm, signals "ready", and blocks until the averaged result appears.
 
+```mermaid
+sequenceDiagram
+    participant DDP as PyTorch DDP
+    participant Hook as drift comm_hook
+    participant SHM as Shared Memory
+    participant Rust as Rust Node
+
+    DDP->>Hook: bucket ready (backward pass)
+    Hook->>SHM: write gradient (zero-copy)
+    Hook->>Rust: DRIFT_ALLREDUCE op_id num_floats (stdout)
+    Rust->>SHM: read gradient
+    Rust->>Rust: ring all-reduce over QUIC
+    Rust->>SHM: write averaged gradient
+    Rust->>Hook: DRIFT_ALLREDUCE_DONE op_id (stdin)
+    Hook->>SHM: read result
+    Hook->>DDP: return averaged tensor
+```
+
 ## Usage
 
 ```python
