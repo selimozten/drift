@@ -32,11 +32,13 @@ def init():
     _shm = DriftShm(shm_name)
     _comm_hook = drift_comm_hook(_shm)
 
-    # Use gloo for DDP initialization (param verification, broadcast, etc.)
-    # The actual gradient allreduce goes through our comm_hook
+    # Use gloo with rank=0, world_size=1 for DDP internal bookkeeping
+    # (param verification, broadcast, etc.). Each Python subprocess is independent;
+    # inter-node gradient sync goes through the Rust QUIC ring via our comm_hook.
+    # Using the real world_size would hang waiting for N-1 gloo peers that don't exist.
     os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
     os.environ.setdefault("MASTER_PORT", "29500")
-    dist.init_process_group(backend="gloo", rank=_rank, world_size=_world_size)
+    dist.init_process_group(backend="gloo", rank=0, world_size=1)
 
     # Signal Rust node that we're ready
     sys.stdout.write("DRIFT_READY\n")

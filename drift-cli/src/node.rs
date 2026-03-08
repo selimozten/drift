@@ -206,6 +206,7 @@ async fn handle_connection(
                             &mut send,
                             &mut recv,
                             &ring_streams,
+                            shard_assignment.as_ref(),
                         )
                         .await?;
                     }
@@ -295,12 +296,13 @@ async fn run_training(
     coord_send: &mut iroh::endpoint::SendStream,
     coord_recv: &mut iroh::endpoint::RecvStream,
     ring_streams: &Arc<Mutex<Option<RingStreams>>>,
+    shard: Option<&drift_proto::ShardAssignment>,
 ) -> Result<()> {
     if config.model_path.ends_with(".py")
         && std::path::Path::new(&config.model_path).exists()
     {
         info!(script = %config.model_path, "launching real Python training");
-        run_real_training(config, ring_config, coord_send, coord_recv, ring_streams).await
+        run_real_training(config, ring_config, coord_send, coord_recv, ring_streams, shard).await
     } else {
         info!("running simulated training with gradient sync");
         simulate_training(config, ring_config, coord_send, coord_recv, ring_streams).await
@@ -314,6 +316,7 @@ async fn run_real_training(
     coord_send: &mut iroh::endpoint::SendStream,
     coord_recv: &mut iroh::endpoint::RecvStream,
     ring_streams: &Arc<Mutex<Option<RingStreams>>>,
+    shard: Option<&drift_proto::ShardAssignment>,
 ) -> Result<()> {
     use drift_proto::ring::{ring_allreduce, RingState};
     use std::process::Stdio;
@@ -326,14 +329,29 @@ async fn run_real_training(
     // 2. Spawn Python subprocess with piped stdio and env vars
     // Python's SharedMemory expects name without leading "/"
     let python_shm_name = shm.python_name().to_string();
-    let mut child = tokio::process::Command::new("python3")
-        .arg(&config.model_path)
+    let master_port = 29500 + (std::process::id() % 1000);
+    let mut cmd = tokio::process::Command::new("python3");
+    cmd.arg(&config.model_path)
         .env("DRIFT_SHM_NAME", &python_shm_name)
         .env("DRIFT_RANK", ring_config.rank.to_string())
         .env("DRIFT_WORLD_SIZE", ring_config.world_size.to_string())
         .env("DRIFT_BATCH_SIZE", config.batch_size.to_string())
         .env("DRIFT_LEARNING_RATE", config.learning_rate.to_string())
         .env("DRIFT_EPOCHS", config.epochs.to_string())
+        .env("MASTER_ADDR", "127.0.0.1")
+        .env("MASTER_PORT", master_port.to_string());
+
+    if let Some(dataset_path) = std::env::var_os("DRIFT_DATASET_PATH") {
+        cmd.env("DRIFT_DATASET_PATH", dataset_path);
+    }
+
+    if let Some(s) = shard {
+        cmd.env("DRIFT_SHARD_INDEX", s.shard_index.to_string())
+            .env("DRIFT_SHARD_START", s.shard_start.to_string())
+            .env("DRIFT_SHARD_END", s.shard_end.to_string());
+    }
+
+    let mut child = cmd
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
