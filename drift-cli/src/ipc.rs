@@ -120,4 +120,28 @@ mod tests {
     fn test_format_stop() {
         assert_eq!(format_stop(), "DRIFT_STOP");
     }
+
+    #[test]
+    fn test_parse_empty_line() {
+        assert_eq!(
+            parse_python_line(""),
+            PythonMessage::Unknown(String::new())
+        );
+    }
+
+    #[test]
+    fn test_parse_whitespace_only() {
+        assert_eq!(
+            parse_python_line("   \n"),
+            PythonMessage::Unknown(String::new())
+        );
+    }
+
+    #[test]
+    fn test_parse_allreduce_large_values() {
+        assert_eq!(
+            parse_python_line("DRIFT_ALLREDUCE 999999 67108864"),
+            PythonMessage::Allreduce { op_id: 999999, num_floats: 67108864 }
+        );
+    }
 }

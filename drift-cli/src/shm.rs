@@ -235,4 +235,29 @@ mod tests {
         let big = vec![0f32; 5];
         assert!(shm.write_gradient(&big).is_err());
     }
+
+    #[test]
+    fn test_overwrite() {
+        let shm = DriftShm::create_named("/drift-test-ow", 4096).unwrap();
+        shm.write_gradient(&[1.0, 2.0, 3.0]).unwrap();
+        shm.write_gradient(&[4.0, 5.0, 6.0]).unwrap();
+        let result = shm.read_gradient(3).unwrap();
+        assert_eq!(result, vec![4.0, 5.0, 6.0]);
+    }
+
+    #[test]
+    fn test_create_by_pid() {
+        let shm = DriftShm::create(99999, 4096).unwrap();
+        assert_eq!(shm.name(), "/drift-shm-99999");
+    }
+
+    #[test]
+    fn test_drop_cleans_up() {
+        let name = "/drift-test-drop";
+        {
+            let _shm = DriftShm::create_named(name, 4096).unwrap();
+        } // dropped here
+        // Should be able to create again (unlinked on drop)
+        let _shm = DriftShm::create_named(name, 4096).unwrap();
+    }
 }
