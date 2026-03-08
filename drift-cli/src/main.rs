@@ -1,6 +1,7 @@
 mod node;
 mod coord;
 mod shm;
+mod ipc;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
